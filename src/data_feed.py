@@ -5,7 +5,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 
-import ccxt
+try:
+    import ccxt  # type: ignore
+except Exception:  # pragma: no cover - environment without ccxt
+    ccxt = None
+
 import numpy as np
 import pandas as pd
 
@@ -23,8 +27,8 @@ class DataFeed:
 
     def __init__(self, config: MarketConfig):
         self.config = config
-        self._exchange: Optional[ccxt.Exchange] = None
-        if not config.offline:
+        self._exchange: Optional[object] = None
+        if not config.offline and ccxt is not None:
             try:
                 self._exchange = ccxt.binance()
             except Exception:

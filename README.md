@@ -7,14 +7,14 @@ This project provides a minimal, resource-friendly loop for training a simple tr
 2. **Create a virtualenv:**
    - PyCharm: *Python Interpreter* → *Add New Interpreter* → *Virtualenv*, point to this folder.
    - Or manually: `python -m venv .venv` and activate it (`source .venv/bin/activate` or `.venv\\Scripts\\activate`).
-3. **Install dependencies:** `pip install -r requirements.txt`.
+3. **Install dependencies:** `pip install -r requirements.txt` (pure Python deps: pandas/numpy/ccxt/rich; no compiled TA libs).
 4. **Configure run target:** In PyCharm, create a *Run Configuration* that calls `main.py` with flags you need, e.g. `--offline --dashboard --steps 50`.
 
 ## Quick start
 ```bash
 python main.py --offline --dashboard --steps 50
 ```
-- `--offline` uses synthetic candles when the Binance API is unavailable.
+- `--offline` uses synthetic candles and works even if `ccxt` is not installed.
 - Remove `--offline` to fetch live 5m candles via `ccxt` (internet required).
 
 ## Learning loop (modern lightweight cycle)
