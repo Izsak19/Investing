@@ -212,7 +212,8 @@ def main() -> None:
         print("Interrupted; saving agent state before exit...")
     finally:
         trainer.agent.save()
-    finally:
+
+    trainer.agent.save()
         if web_dashboard:
             web_dashboard.stop()
 
