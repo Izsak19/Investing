@@ -74,6 +74,9 @@ class WebDashboard:
         self._thread = threading.Thread(target=self._server.run, daemon=True)
         self._thread.start()
 
+        display_host = "localhost" if self.host in {"0.0.0.0", "::"} else self.host
+        print(f"[web] Dashboard available at http://{display_host}:{self.port}")
+
     def stop(self) -> None:
         if self._server:
             self._server.should_exit = True

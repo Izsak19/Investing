@@ -51,6 +51,9 @@
     <header>
       <h1>Live Trading View</h1>
       <p>Latest candles, actions, and portfolio metrics streamed from the trainer.</p>
+      <p id="status" style="margin: 0; font-size: 0.9rem; color: #94a3b8;">
+        Connecting to trainer…
+      </p>
     </header>
     <main>
       <div id="chart"></div>
@@ -110,6 +113,8 @@
       };
 
       let lastId = -1;
+      const POLL_INTERVAL_MS = 1000;
+      const statusEl = document.getElementById("status");
 
       function updateMetrics(metrics) {
         if (!metrics) return;
@@ -164,16 +169,25 @@
         );
       }
 
-      async function poll() {
+      async function pollOnce() {
         try {
-          const res = await fetch(`/api/events?since=${lastId}`);
-          if (!res.ok) return;
+          const res = await fetch(`/api/events?since=${lastId}`, { cache: "no-store" });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
           const payload = await res.json();
           lastId = payload.last_id ?? lastId;
           updateChart(payload.events);
           updateMetrics(payload.metrics);
+          statusEl.textContent = `Last update: ${new Date().toLocaleTimeString()}`;
         } catch (err) {
           console.error("Poll failed", err);
+          statusEl.textContent = "Disconnected from trainer";
+        }
+      }
+
+      async function startPolling() {
+        while (true) {
+          await pollOnce();
+          await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
         }
       }
 
@@ -191,7 +205,7 @@
         legend: { orientation: "h" },
       });
 
-      setInterval(poll, 1000);
+      startPolling();
     </script>
   </body>
 </html>

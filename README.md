@@ -76,6 +76,7 @@ python main.py --offline --web-dashboard --dashboard --duration 120
 
 - Opens a FastAPI server on `http://localhost:8000` (override with `--web-port`).
 - Streams OHLC candles, actions, and portfolio metrics to the browser while still rendering the terminal dashboard.
+- The console prints a friendly link (`Dashboard available at http://localhost:8000`) even when the server binds to `0.0.0.0`.
 
 ## Safety & next steps
 - This code is for experimentation only—do **not** use it for real-money trading without substantial risk controls.
