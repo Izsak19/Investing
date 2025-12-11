@@ -160,9 +160,8 @@ def main() -> None:
             for _ in loop:
                 pass
     except KeyboardInterrupt:
-        trainer.agent.save()
-        raise
-    else:
+        print("Interrupted; saving agent state before exit...")
+    finally:
         trainer.agent.save()
 
 
