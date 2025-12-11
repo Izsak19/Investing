@@ -67,6 +67,16 @@ The code implements a lean version of the typical ML lifecycle:
 ## Dashboard
 Enable `--dashboard` to see a live table that refreshes as the agent trains. It is text-only to minimize resource usage and works well inside PyCharm's Run window.
 
+## HTML dashboard
+For a richer visualization, launch the Plotly-powered web dashboard:
+
+```bash
+python main.py --offline --web-dashboard --dashboard --duration 120
+```
+
+- Opens a FastAPI server on `http://localhost:8000` (override with `--web-port`).
+- Streams OHLC candles, actions, and portfolio metrics to the browser while still rendering the terminal dashboard.
+
 ## Safety & next steps
 - This code is for experimentation only—do **not** use it for real-money trading without substantial risk controls.
 - For production use, add proper exchange credentials management, slippage/fee modeling, and unit tests for indicator correctness.

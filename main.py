@@ -13,6 +13,7 @@ from src.data_feed import DataFeed, MarketConfig
 from src.indicators import compute_indicators
 from src.dashboard import live_dashboard
 from src.trainer import Trainer
+from src.webapp import WebDashboard
 
 
 def parse_args() -> argparse.Namespace:
@@ -35,13 +36,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--offline", action="store_true", help="use synthetic data instead of live exchange")
     parser.add_argument("--dashboard", action="store_true", help="enable live dashboard rendering")
+    parser.add_argument("--web-dashboard", action="store_true", help="serve a Plotly HTML dashboard on port 8000")
+    parser.add_argument("--web-port", type=int, default=8000, help="port for the web dashboard")
     parser.add_argument("--continuous", action="store_true", help="keep fetching live data until interrupted")
     return parser.parse_args()
 
 
 def run_loop(
     trainer: Trainer, frame: pd.DataFrame, steps: int, duration: float | None, delay: float
-) -> Iterable[tuple[int, float, str, float]]:
+) -> Iterable[tuple[int, pd.Series, str, float]]:
     """
     Generate trading events either for a fixed number of steps or until a duration elapses.
 
@@ -68,7 +71,7 @@ def run_loop(
         trainer.step(row, idx)
         after_trade_value = trainer.portfolio.value(price)
         delta = after_trade_value - before_trade_value
-        yield idx, price, trainer.history[-1][1], delta
+        yield idx, row, trainer.history[-1][1], delta
 
         idx += 1
         if delay > 0:
@@ -77,7 +80,7 @@ def run_loop(
 
 def stream_live(
     trainer: Trainer, feed: DataFeed, delay: float
-) -> Iterable[tuple[int, float, str, float]]:
+) -> Iterable[tuple[int, pd.Series, str, float]]:
     """Continuously fetch new market data and yield trading events indefinitely."""
 
     last_ts = None
@@ -101,7 +104,7 @@ def stream_live(
             after_trade_value = trainer.portfolio.value(price)
             delta = after_trade_value - before_trade_value
 
-            yield idx, price, trainer.history[-1][1], delta
+            yield idx, row, trainer.history[-1][1], delta
 
             idx += 1
             last_ts = ts if ts is not None else last_ts
@@ -139,6 +142,9 @@ def main() -> None:
 
     agent = BanditAgent()
     trainer = Trainer(agent)
+    web_dashboard = WebDashboard(port=args.web_port) if args.web_dashboard else None
+    if web_dashboard:
+        web_dashboard.start()
 
     if args.continuous:
         loop = stream_live(trainer, feed, args.delay)
@@ -152,17 +158,63 @@ def main() -> None:
             from src.dashboard import live_dashboard as render
 
             def enrich(events):
-                for step, price, action, reward in events:
+                for step, row, action, reward in events:
+                    price = float(row["close"])
+                    if web_dashboard:
+                        web_dashboard.publish_event(
+                            step=step,
+                            timestamp=row.get("timestamp"),
+                            ohlc={
+                                "open": float(row.get("open", price)),
+                                "high": float(row.get("high", price)),
+                                "low": float(row.get("low", price)),
+                                "close": price,
+                            },
+                            action=action,
+                            reward=reward,
+                            portfolio_value=trainer.portfolio.value(price),
+                            cash=trainer.portfolio.cash,
+                            position=trainer.portfolio.position,
+                            success_rate=trainer.success_rate,
+                            total_reward=trainer.agent.state.total_reward,
+                        )
                     yield step, price, action, reward, trainer.portfolio, agent, trainer.success_rate
 
             render(enrich(loop))
         else:
-            for _ in loop:
+
+            def emit(events):
+                for step, row, action, reward in events:
+                    price = float(row["close"])
+                    if web_dashboard:
+                        web_dashboard.publish_event(
+                            step=step,
+                            timestamp=row.get("timestamp"),
+                            ohlc={
+                                "open": float(row.get("open", price)),
+                                "high": float(row.get("high", price)),
+                                "low": float(row.get("low", price)),
+                                "close": price,
+                            },
+                            action=action,
+                            reward=reward,
+                            portfolio_value=trainer.portfolio.value(price),
+                            cash=trainer.portfolio.cash,
+                            position=trainer.portfolio.position,
+                            success_rate=trainer.success_rate,
+                            total_reward=trainer.agent.state.total_reward,
+                        )
+                    yield
+
+            for _ in emit(loop):
                 pass
     except KeyboardInterrupt:
         print("Interrupted; saving agent state before exit...")
     finally:
         trainer.agent.save()
+    finally:
+        if web_dashboard:
+            web_dashboard.stop()
 
 
 if __name__ == "__main__":
