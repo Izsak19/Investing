@@ -98,7 +98,7 @@
         y: [],
         mode: "markers",
         name: "Actions",
-        marker: { size: 10 },
+        marker: { size: 10, color: [] },
         text: [],
         hovertemplate: "%{text}<br>Price: %{y}<extra></extra>",
       };
@@ -128,45 +128,48 @@
       function updateChart(events) {
         if (!events || events.length === 0) return;
 
+        const candleUpdate = {
+          x: [[]],
+          open: [[]],
+          high: [[]],
+          low: [[]],
+          close: [[]],
+        };
+
+        const actionUpdate = {
+          x: [[]],
+          y: [[]],
+          text: [[]],
+          marker: { color: [[]] },
+        };
+
+        const portfolioUpdate = {
+          x: [[]],
+          y: [[]],
+        };
+
         events.forEach((evt) => {
           const label = evt.timestamp || `Step ${evt.step}`;
-          candleTrace.x.push(label);
-          candleTrace.open.push(evt.open);
-          candleTrace.high.push(evt.high);
-          candleTrace.low.push(evt.low);
-          candleTrace.close.push(evt.close);
+
+          candleUpdate.x[0].push(label);
+          candleUpdate.open[0].push(evt.open);
+          candleUpdate.high[0].push(evt.high);
+          candleUpdate.low[0].push(evt.low);
+          candleUpdate.close[0].push(evt.close);
 
           const actionColor = evt.action === "buy" ? "#22c55e" : evt.action === "sell" ? "#ef4444" : "#6366f1";
-          actionTrace.x.push(label);
-          actionTrace.y.push(evt.close);
-          actionTrace.text.push(`${evt.action.toUpperCase()} @ ${evt.close.toFixed(2)}`);
-          if (!actionTrace.marker.color) {
-            actionTrace.marker.color = [];
-          }
-          actionTrace.marker.color.push(actionColor);
+          actionUpdate.x[0].push(label);
+          actionUpdate.y[0].push(evt.close);
+          actionUpdate.text[0].push(`${evt.action.toUpperCase()} @ ${evt.close.toFixed(2)}`);
+          actionUpdate.marker.color[0].push(actionColor);
 
-          portfolioTrace.x.push(label);
-          portfolioTrace.y.push(evt.portfolio_value);
+          portfolioUpdate.x[0].push(label);
+          portfolioUpdate.y[0].push(evt.portfolio_value);
         });
 
-        Plotly.react(
-          "chart",
-          [candleTrace, actionTrace, portfolioTrace],
-          {
-            template: "plotly_dark",
-            margin: { t: 40, r: 20, b: 40, l: 60 },
-            xaxis: { rangeslider: { visible: false } },
-            yaxis: { title: "Price" },
-            yaxis2: {
-              title: "Portfolio",
-              overlaying: "y",
-              side: "right",
-              showgrid: false,
-            },
-            legend: { orientation: "h" },
-          },
-          { responsive: true }
-        );
+        Plotly.extendTraces("chart", candleUpdate, [0], history);
+        Plotly.extendTraces("chart", actionUpdate, [1], history);
+        Plotly.extendTraces("chart", portfolioUpdate, [2], history);
       }
 
       async function pollOnce() {
@@ -190,6 +193,8 @@
           await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
         }
       }
+
+      const history = 500;
 
       Plotly.newPlot("chart", [candleTrace, actionTrace, portfolioTrace], {
         template: "plotly_dark",
