@@ -12,8 +12,10 @@ This project provides a minimal, resource-friendly loop for training a simple tr
 
 ## Quick start
 ```bash
-python main.py --offline --dashboard --steps 50
+python main.py --offline --dashboard --duration 120
 ```
+- `--duration` runs the loop for a number of **seconds** so you can watch the bandit adapt in real time.
+- `--delay` controls the pause between events (default 1s) to keep the dashboard readable.
 - `--offline` uses synthetic candles and works even if `ccxt` is not installed.
 - Remove `--offline` to fetch live 5m candles via `ccxt` (internet required).
 
