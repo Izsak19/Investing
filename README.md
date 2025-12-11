@@ -17,6 +17,32 @@ python main.py --offline --dashboard --steps 50
 - `--offline` uses synthetic candles and works even if `ccxt` is not installed.
 - Remove `--offline` to fetch live 5m candles via `ccxt` (internet required).
 
+## Online learning cycles (live candles)
+The trainer consumes 5m candles by default, so each hour of learning is `12` steps (`60 / 5`). The dashboard (`--dashboard`) refreshes after **every trading action** so you can watch each decision in real time.
+
+- **Custom duration:**
+  ```bash
+  HOURS=1
+  python main.py --dashboard --steps $((HOURS * 12))
+  ```
+
+- **2h cycle:**
+  ```bash
+  python main.py --dashboard --steps 24
+  ```
+
+- **6h cycle:**
+  ```bash
+  python main.py --dashboard --steps 72
+  ```
+
+- **12h cycle:**
+  ```bash
+  python main.py --dashboard --steps 144
+  ```
+
+If you prefer a different timeframe (e.g., `1m`), adjust `--timeframe` and rescale the `--steps` count accordingly.
+
 ## Learning loop (modern lightweight cycle)
 The code implements a lean version of the typical ML lifecycle:
 1. **Data ingestion** — `DataFeed` pulls live candles or generates synthetic data.
