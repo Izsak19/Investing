@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import time
 from typing import Iterable
 
@@ -20,7 +21,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeframe", default=config.DEFAULT_TIMEFRAME)
     parser.add_argument("--limit", type=int, default=config.DEFAULT_LIMIT)
     parser.add_argument("--steps", type=int, default=50, help="max steps to run (ignored when --duration is set)")
-    parser.add_argument("--duration", type=float, default=None, help="seconds to keep training; overrides --steps")
+    parser.add_argument(
+        "--duration",
+        type=float,
+        default=None,
+        help="seconds to keep training; also interpreted as a minute lookback window when offline",
+    )
     parser.add_argument(
         "--delay",
         type=float,
@@ -104,9 +110,32 @@ def stream_live(
                 time.sleep(delay)
 
 
+def timeframe_to_minutes(timeframe: str) -> float:
+    """Convert timeframe strings like "1m", "5m", or "1h" to minutes."""
+
+    if not timeframe:
+        return 1.0
+
+    unit = timeframe[-1].lower()
+    try:
+        quantity = float(timeframe[:-1])
+    except ValueError:
+        return 1.0
+
+    multiplier = {"m": 1, "h": 60, "d": 24 * 60}.get(unit)
+    return quantity * multiplier if multiplier else 1.0
+
+
 def main() -> None:
     args = parse_args()
-    feed = DataFeed(MarketConfig(symbol=args.symbol, timeframe=args.timeframe, limit=args.limit, offline=args.offline))
+    limit = args.limit
+    if args.offline and args.duration:
+        candles_for_window = math.ceil(args.duration / timeframe_to_minutes(args.timeframe))
+        limit = max(limit, candles_for_window)
+
+    feed = DataFeed(
+        MarketConfig(symbol=args.symbol, timeframe=args.timeframe, limit=limit, offline=args.offline)
+    )
 
     agent = BanditAgent()
     trainer = Trainer(agent)
