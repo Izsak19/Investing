@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 from typing import Iterable
 
 import pandas as pd
@@ -18,19 +19,53 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--symbol", default=config.DEFAULT_SYMBOL)
     parser.add_argument("--timeframe", default=config.DEFAULT_TIMEFRAME)
     parser.add_argument("--limit", type=int, default=config.DEFAULT_LIMIT)
-    parser.add_argument("--steps", type=int, default=50, help="max steps to run")
+    parser.add_argument("--steps", type=int, default=50, help="max steps to run (ignored when --duration is set)")
+    parser.add_argument("--duration", type=float, default=None, help="seconds to keep training; overrides --steps")
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=config.DASHBOARD_REFRESH,
+        help="pause (seconds) between trading events to make learning visible",
+    )
     parser.add_argument("--offline", action="store_true", help="use synthetic data instead of live exchange")
     parser.add_argument("--dashboard", action="store_true", help="enable live dashboard rendering")
     return parser.parse_args()
 
 
-def run_loop(trainer: Trainer, frame: pd.DataFrame, steps: int) -> Iterable[tuple[int, float, str, float]]:
-    for idx, row in frame.head(steps).iterrows():
-        before_trade_value = trainer.portfolio.value(float(row["close"]))
+def run_loop(
+    trainer: Trainer, frame: pd.DataFrame, steps: int, duration: float | None, delay: float
+) -> Iterable[tuple[int, float, str, float]]:
+    """
+    Generate trading events either for a fixed number of steps or until a duration elapses.
+
+    When a duration is provided the data frame is cycled to keep producing events and a
+    small delay is applied between steps so the dashboard can render progress over time.
+    """
+
+    start = time.monotonic()
+    idx = 0
+    row_count = len(frame)
+    if row_count == 0:
+        return
+
+    while True:
+        if duration is None and idx >= steps:
+            break
+        if duration is not None and time.monotonic() - start >= duration:
+            break
+
+        row = frame.iloc[idx % row_count]
+        price = float(row["close"])
+
+        before_trade_value = trainer.portfolio.value(price)
         trainer.step(row, idx)
-        after_trade_value = trainer.portfolio.value(float(row["close"]))
+        after_trade_value = trainer.portfolio.value(price)
         delta = after_trade_value - before_trade_value
-        yield idx, float(row["close"]), trainer.history[-1][1], delta
+        yield idx, price, trainer.history[-1][1], delta
+
+        idx += 1
+        if delay > 0:
+            time.sleep(delay)
 
 
 def main() -> None:
@@ -42,7 +77,7 @@ def main() -> None:
     agent = BanditAgent()
     trainer = Trainer(agent)
 
-    loop = run_loop(trainer, feature_frame, args.steps)
+    loop = run_loop(trainer, feature_frame, args.steps, args.duration, args.delay)
 
     if args.dashboard:
         from src.dashboard import live_dashboard as render
