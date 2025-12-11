@@ -118,19 +118,23 @@ def main() -> None:
         feature_frame = compute_indicators(raw_frame)
         loop = run_loop(trainer, feature_frame, args.steps, args.duration, args.delay)
 
-    if args.dashboard:
-        from src.dashboard import live_dashboard as render
+    try:
+        if args.dashboard:
+            from src.dashboard import live_dashboard as render
 
-        def enrich(events):
-            for step, price, action, reward in events:
-                yield step, price, action, reward, trainer.portfolio, agent, trainer.success_rate
+            def enrich(events):
+                for step, price, action, reward in events:
+                    yield step, price, action, reward, trainer.portfolio, agent, trainer.success_rate
 
-        render(enrich(loop))
+            render(enrich(loop))
+        else:
+            for _ in loop:
+                pass
+    except KeyboardInterrupt:
+        trainer.agent.save()
+        raise
     else:
-        for _ in loop:
-            pass
-
-    trainer.agent.save()
+        trainer.agent.save()
 
 
 if __name__ == "__main__":
