@@ -213,7 +213,6 @@ def main() -> None:
     finally:
         trainer.agent.save()
 
-    trainer.agent.save()
         if web_dashboard:
             web_dashboard.stop()
 
