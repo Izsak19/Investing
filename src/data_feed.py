@@ -17,7 +17,7 @@ import pandas as pd
 @dataclass
 class MarketConfig:
     symbol: str
-    timeframe: str = "5m"
+    timeframe: str = "1m"
     limit: int = 200
     offline: bool = False
 
@@ -52,7 +52,7 @@ class DataFeed:
 
     def _generate_synthetic(self) -> pd.DataFrame:
         now = datetime.utcnow()
-        timestamps = [now - i * timedelta(minutes=5) for i in range(self.config.limit)][::-1]
+        timestamps = [now - i * timedelta(minutes=1) for i in range(self.config.limit)][::-1]
         prices = [30000 + random.gauss(0, 40) for _ in timestamps]
         df = pd.DataFrame({
             "timestamp": timestamps,
