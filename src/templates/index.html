@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Trading Dashboard</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 0;
+        background: #0f172a;
+        color: #e2e8f0;
+      }
+      header {
+        padding: 1rem 1.5rem;
+        background: #1e293b;
+        border-bottom: 1px solid #334155;
+      }
+      main {
+        padding: 1.5rem;
+      }
+      #chart {
+        width: 100%;
+        height: 480px;
+      }
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 1rem;
+        margin-top: 1rem;
+      }
+      .metric {
+        padding: 0.75rem 1rem;
+        background: #1f2937;
+        border: 1px solid #334155;
+        border-radius: 8px;
+      }
+      .metric h3 {
+        margin: 0 0 0.5rem;
+        font-size: 0.95rem;
+        color: #a5b4fc;
+      }
+      .metric span {
+        font-size: 1.2rem;
+        font-weight: bold;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Live Trading View</h1>
+      <p>Latest candles, actions, and portfolio metrics streamed from the trainer.</p>
+    </header>
+    <main>
+      <div id="chart"></div>
+      <section class="metrics">
+        <div class="metric">
+          <h3>Portfolio Value</h3>
+          <span id="portfolioValue">--</span>
+        </div>
+        <div class="metric">
+          <h3>Cash</h3>
+          <span id="cashValue">--</span>
+        </div>
+        <div class="metric">
+          <h3>Position</h3>
+          <span id="positionValue">--</span>
+        </div>
+        <div class="metric">
+          <h3>Success Rate</h3>
+          <span id="successRate">--</span>
+        </div>
+        <div class="metric">
+          <h3>Total Reward</h3>
+          <span id="totalReward">--</span>
+        </div>
+      </section>
+    </main>
+    <script>
+      const candleTrace = {
+        x: [],
+        open: [],
+        high: [],
+        low: [],
+        close: [],
+        type: "candlestick",
+        name: "Price",
+        increasing: { line: { color: "#10b981" } },
+        decreasing: { line: { color: "#ef4444" } },
+      };
+
+      const actionTrace = {
+        x: [],
+        y: [],
+        mode: "markers",
+        name: "Actions",
+        marker: { size: 10 },
+        text: [],
+        hovertemplate: "%{text}<br>Price: %{y}<extra></extra>",
+      };
+
+      const portfolioTrace = {
+        x: [],
+        y: [],
+        mode: "lines",
+        name: "Portfolio Value",
+        line: { color: "#fbbf24" },
+        yaxis: "y2",
+      };
+
+      let lastId = -1;
+
+      function updateMetrics(metrics) {
+        if (!metrics) return;
+        document.getElementById("portfolioValue").textContent = (metrics.portfolio_value || 0).toFixed(2);
+        document.getElementById("cashValue").textContent = (metrics.cash || 0).toFixed(2);
+        document.getElementById("positionValue").textContent = (metrics.position || 0).toFixed(6);
+        document.getElementById("successRate").textContent = `${(metrics.success_rate || 0).toFixed(2)}%`;
+        document.getElementById("totalReward").textContent = (metrics.total_reward || 0).toFixed(2);
+      }
+
+      function updateChart(events) {
+        if (!events || events.length === 0) return;
+
+        events.forEach((evt) => {
+          const label = evt.timestamp || `Step ${evt.step}`;
+          candleTrace.x.push(label);
+          candleTrace.open.push(evt.open);
+          candleTrace.high.push(evt.high);
+          candleTrace.low.push(evt.low);
+          candleTrace.close.push(evt.close);
+
+          const actionColor = evt.action === "buy" ? "#22c55e" : evt.action === "sell" ? "#ef4444" : "#6366f1";
+          actionTrace.x.push(label);
+          actionTrace.y.push(evt.close);
+          actionTrace.text.push(`${evt.action.toUpperCase()} @ ${evt.close.toFixed(2)}`);
+          if (!actionTrace.marker.color) {
+            actionTrace.marker.color = [];
+          }
+          actionTrace.marker.color.push(actionColor);
+
+          portfolioTrace.x.push(label);
+          portfolioTrace.y.push(evt.portfolio_value);
+        });
+
+        Plotly.react(
+          "chart",
+          [candleTrace, actionTrace, portfolioTrace],
+          {
+            template: "plotly_dark",
+            margin: { t: 40, r: 20, b: 40, l: 60 },
+            xaxis: { rangeslider: { visible: false } },
+            yaxis: { title: "Price" },
+            yaxis2: {
+              title: "Portfolio",
+              overlaying: "y",
+              side: "right",
+              showgrid: false,
+            },
+            legend: { orientation: "h" },
+          },
+          { responsive: true }
+        );
+      }
+
+      async function poll() {
+        try {
+          const res = await fetch(`/api/events?since=${lastId}`);
+          if (!res.ok) return;
+          const payload = await res.json();
+          lastId = payload.last_id ?? lastId;
+          updateChart(payload.events);
+          updateMetrics(payload.metrics);
+        } catch (err) {
+          console.error("Poll failed", err);
+        }
+      }
+
+      Plotly.newPlot("chart", [candleTrace, actionTrace, portfolioTrace], {
+        template: "plotly_dark",
+        margin: { t: 40, r: 20, b: 40, l: 60 },
+        xaxis: { rangeslider: { visible: false } },
+        yaxis: { title: "Price" },
+        yaxis2: {
+          title: "Portfolio",
+          overlaying: "y",
+          side: "right",
+          showgrid: false,
+        },
+        legend: { orientation: "h" },
+      });
+
+      setInterval(poll, 1000);
+    </script>
+  </body>
+</html>
