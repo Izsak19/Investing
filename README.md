@@ -1,6 +1,6 @@
 # Investing lightweight BTC/USDT trainer
 
-This project provides a minimal, resource-friendly loop for training a simple trading bandit on 5-minute BTC/USDT candles using common technical indicators (MA, EMA, WMA, Bollinger Bands, VWAP, ATR, TRIX, SAR, SuperTrend). It includes a terminal dashboard to visualize live progress.
+This project provides a minimal, resource-friendly loop for training a simple trading bandit on 1-minute BTC/USDT candles using common technical indicators (MA, EMA, WMA, Bollinger Bands, VWAP, ATR, TRIX, SAR, SuperTrend). It includes a terminal dashboard to visualize live progress.
 
 ## Environment setup (PyCharm-friendly)
 1. **Clone & open:** Open the project folder in PyCharm (File → Open…).
@@ -17,33 +17,33 @@ python main.py --offline --dashboard --duration 120
 - `--duration` runs the loop for a number of **seconds** so you can watch the bandit adapt in real time.
 - `--delay` controls the pause between events (default 1s) to keep the dashboard readable.
 - `--offline` uses synthetic candles and works even if `ccxt` is not installed.
-- Remove `--offline` to fetch live 5m candles via `ccxt` (internet required).
+- Remove `--offline` to fetch live 1m candles via `ccxt` (internet required).
 
 ## Online learning cycles (live candles)
-The trainer consumes 5m candles by default, so each hour of learning is `12` steps (`60 / 5`). The dashboard (`--dashboard`) refreshes after **every trading action** so you can watch each decision in real time.
+The trainer consumes 1m candles by default, so each hour of learning is `60` steps (`60 / 1`). The dashboard (`--dashboard`) refreshes after **every trading action** so you can watch each decision in real time.
 
 - **Custom duration:**
   ```bash
   HOURS=1
-  python main.py --dashboard --steps $((HOURS * 12))
+  python main.py --dashboard --steps $((HOURS * 60))
   ```
 
 - **2h cycle:**
   ```bash
-  python main.py --dashboard --steps 24
+  python main.py --dashboard --steps 120
   ```
 
 - **6h cycle:**
   ```bash
-  python main.py --dashboard --steps 72
+  python main.py --dashboard --steps 360
   ```
 
 - **12h cycle:**
   ```bash
-  python main.py --dashboard --steps 144
+  python main.py --dashboard --steps 720
   ```
 
-If you prefer a different timeframe (e.g., `1m`), adjust `--timeframe` and rescale the `--steps` count accordingly.
+If you prefer a different timeframe (e.g., `5m`), adjust `--timeframe` and rescale the `--steps` count accordingly.
 
 ## Learning loop (modern lightweight cycle)
 The code implements a lean version of the typical ML lifecycle:
