@@ -29,6 +29,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--offline", action="store_true", help="use synthetic data instead of live exchange")
     parser.add_argument("--dashboard", action="store_true", help="enable live dashboard rendering")
+    parser.add_argument("--continuous", action="store_true", help="keep fetching live data until interrupted")
     return parser.parse_args()
 
 
@@ -68,23 +69,61 @@ def run_loop(
             time.sleep(delay)
 
 
+def stream_live(
+    trainer: Trainer, feed: DataFeed, delay: float
+) -> Iterable[tuple[int, float, str, float]]:
+    """Continuously fetch new market data and yield trading events indefinitely."""
+
+    last_ts = None
+    idx = 0
+
+    while True:
+        frame = compute_indicators(feed.fetch())
+        if frame.empty:
+            if delay > 0:
+                time.sleep(delay)
+            continue
+
+        for _, row in frame.iterrows():
+            ts = row.get("timestamp")
+            if last_ts is not None and ts is not None and ts <= last_ts:
+                continue
+
+            price = float(row["close"])
+            before_trade_value = trainer.portfolio.value(price)
+            trainer.step(row, idx)
+            after_trade_value = trainer.portfolio.value(price)
+            delta = after_trade_value - before_trade_value
+
+            yield idx, price, trainer.history[-1][1], delta
+
+            idx += 1
+            last_ts = ts if ts is not None else last_ts
+
+            if delay > 0:
+                time.sleep(delay)
+
+
 def main() -> None:
     args = parse_args()
     feed = DataFeed(MarketConfig(symbol=args.symbol, timeframe=args.timeframe, limit=args.limit, offline=args.offline))
-    raw_frame = feed.fetch()
-    feature_frame = compute_indicators(raw_frame)
 
     agent = BanditAgent()
     trainer = Trainer(agent)
 
-    loop = run_loop(trainer, feature_frame, args.steps, args.duration, args.delay)
+    if args.continuous:
+        loop = stream_live(trainer, feed, args.delay)
+    else:
+        raw_frame = feed.fetch()
+        feature_frame = compute_indicators(raw_frame)
+        loop = run_loop(trainer, feature_frame, args.steps, args.duration, args.delay)
 
     if args.dashboard:
         from src.dashboard import live_dashboard as render
 
         def enrich(events):
             for step, price, action, reward in events:
-                yield step, price, action, reward, trainer.portfolio, agent
+                yield step, price, action, reward, trainer.portfolio, agent, trainer.success_rate
 
         render(enrich(loop))
     else:

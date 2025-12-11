@@ -27,6 +27,8 @@ class Trainer:
         self.agent = agent
         self.portfolio = Portfolio(cash=initial_cash)
         self.history: List[Tuple[int, str, float, float]] = []  # step, action, price, reward
+        self.total_trades: int = 0
+        self.successful_trades: int = 0
 
     def step(self, row: pd.Series, step_idx: int) -> None:
         price = float(row["close"])
@@ -48,6 +50,15 @@ class Trainer:
 
         self.agent.update(action, reward)
         self.history.append((step_idx, action, price, reward))
+        self.total_trades += 1
+        if reward > 0:
+            self.successful_trades += 1
+
+    @property
+    def success_rate(self) -> float:
+        if self.total_trades == 0:
+            return 0.0
+        return (self.successful_trades / self.total_trades) * 100
 
     def run(self, frame: pd.DataFrame, max_steps: int | None = None) -> None:
         steps = max_steps if max_steps is not None else len(frame)
