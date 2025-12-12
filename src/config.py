@@ -9,6 +9,7 @@ RUNS_DIR = "data/runs"
 DEFAULT_CHECKPOINT_EVERY = 2000
 DEFAULT_FLUSH_TRADES_EVERY = 500
 DEFAULT_KEEP_LAST_CHECKPOINTS = 5
+DEFAULT_RANDOM_SEED = 1337
 FEE_RATE = 0.001  # 0.1% per transaction on Binance spot
 INITIAL_CASH = 1000.0
 # Minimum idle cash before we automatically refill the portfolio so the learner
@@ -55,6 +56,7 @@ ACTION_HISTORY_WINDOW = 5_000
 MIN_HOLD_STEPS = 3
 MIN_TRADE_GAP_STEPS = 2
 POSITION_FRACTION = 0.5
+WALKFORWARD_FOLDS = 3
 
 # Dashboard refresh rate in seconds
 DASHBOARD_REFRESH = 1.0
