@@ -13,8 +13,8 @@ import pandas as pd
 from src import config
 from src.agent import BanditAgent
 from src.data_feed import DataFeed, MarketConfig
-from src.indicators import INDICATOR_COLUMNS, compute_indicators
-from src.trainer import Portfolio, Trainer
+from src.indicators import compute_indicators
+from src.trainer import Portfolio, Trainer, build_features
 
 
 @dataclass
@@ -78,7 +78,7 @@ def simulate_agent(agent: BanditAgent, frame: pd.DataFrame, initial_cash: float)
         next_row = frame.iloc[idx + 1]
         price_now = float(row["close"])
         price_next = float(next_row["close"])
-        features = row[INDICATOR_COLUMNS].to_numpy(dtype=float)
+        features = build_features(row, portfolio)
 
         allowed_actions = ["hold"]
         if portfolio.position > 0:
@@ -86,7 +86,7 @@ def simulate_agent(agent: BanditAgent, frame: pd.DataFrame, initial_cash: float)
         if portfolio.cash > 0:
             allowed_actions.append("buy")
 
-        action = agent.act(features, allowed=allowed_actions, step=idx)
+        action = agent.act(features, allowed=allowed_actions, step=idx, epsilon_override=0.0)
         reward = 0.0
 
         value_before = portfolio.value(price_now)
