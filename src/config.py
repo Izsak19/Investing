@@ -15,12 +15,18 @@ INITIAL_CASH = 1000.0
 # can keep exploring after burning down its balance during early training.
 MIN_TRAINING_CASH = 50.0
 
-# Hyperparameters for the simple bandit learner
-ALPHA = 0.1  # learning rate
-GAMMA = 0.9  # discount factor for TD updates
+# Hyperparameters for the contextual bandit learner
+ALPHA = 0.1  # retained for backwards compatibility with saved state
+GAMMA = 0.9  # retained for backwards compatibility with saved state
 USE_TD = True
-EPSILON = 0.1  # exploration probability
-EPSILON_START = 0.10
+# LinUCB-style exploration bonus multiplier; higher means more exploration when
+# the agent is uncertain about a context-action pair.
+UCB_SCALE = 0.5
+# Strength of the L2 prior (lambda * I) on the design matrix; higher values make
+# the posterior more conservative and slow down updates early in training.
+RIDGE_FACTOR = 1.0
+EPSILON = 0.05  # rare random exploration to escape local optima
+EPSILON_START = 0.05
 EPSILON_END = 0.01
 EPSILON_DECAY_STEPS = 200_000
 
