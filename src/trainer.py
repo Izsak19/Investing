@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import csv
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,7 +41,12 @@ class Trainer:
     def step(self, row: pd.Series, step_idx: int) -> None:
         price = float(row["close"])
         self._maybe_refill_portfolio()
-        features = row[INDICATOR_COLUMNS].to_numpy(dtype=float)
+        raw_features = row[INDICATOR_COLUMNS].to_numpy(dtype=float)
+        # Normalize indicators by the current close so the bandit sees mostly
+        # unit-scale inputs instead of raw price-denominated values that can
+        # blow up Q-values.
+        price_scale = max(price, 1e-6)
+        features = raw_features / price_scale
         action = self.agent.act(features)
         reward = 0.0
 
@@ -67,7 +73,11 @@ class Trainer:
         else:
             reward = (price - self.portfolio.entry_price) * self.portfolio.position
 
-        self.agent.update(action, reward, features)
+        # Bound the learning signal so weight updates stay within a stable range
+        # even when raw P&L swings are large. The actual reward is still tracked
+        # for reporting, but the bandit learns from the scaled value.
+        scaled_reward = math.tanh(reward / max(price, 1e-6))
+        self.agent.update(action, scaled_reward, features, actual_reward=reward)
         self.history.append((step_idx, action, price, reward))
         self.total_trades += 1
         if reward > 0:
