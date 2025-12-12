@@ -13,7 +13,8 @@ MIN_TRAINING_CASH = 50.0
 
 # Hyperparameters for the simple bandit learner
 ALPHA = 0.1  # learning rate
-GAMMA = 0.0  # no discounting for one-step reward
+GAMMA = 0.9  # discount factor for TD updates
+USE_TD = True
 EPSILON = 0.1  # exploration probability
 EPSILON_START = 0.10
 EPSILON_END = 0.01

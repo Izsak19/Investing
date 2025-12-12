@@ -44,7 +44,8 @@ def fetch_last_24h(symbol: str, timeframe: str, offline: bool) -> pd.DataFrame:
     minutes = timeframe_to_minutes(timeframe)
     candles_needed = math.ceil((24 * 60) / minutes)
     feed = DataFeed(MarketConfig(symbol=symbol, timeframe=timeframe, limit=candles_needed, offline=offline))
-    return feed.fetch()
+    frame, _ = feed.fetch()
+    return frame
 
 
 def validate_frame(frame: pd.DataFrame) -> pd.DataFrame:

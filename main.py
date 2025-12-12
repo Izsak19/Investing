@@ -55,8 +55,8 @@ def run_loop(
     start = time.monotonic()
     idx = 0
     row_count = len(frame)
-    if row_count == 0:
-        return
+    if row_count < 2:
+        return []
 
     first_price = float(frame.iloc[0]["close"])
     pv_prev_after = trainer.portfolio.value(first_price)
@@ -68,10 +68,11 @@ def run_loop(
             break
 
         row = frame.iloc[idx % row_count]
+        next_row = frame.iloc[(idx + 1) % row_count]
         price = float(row["close"])
 
         before_trade_value = trainer.portfolio.value(price)
-        result = trainer.step(row, idx)
+        result = trainer.step(row, next_row, idx)
         after_trade_value = trainer.portfolio.value(price)
         trade_impact = after_trade_value - before_trade_value
         mtm_delta = after_trade_value - pv_prev_after
@@ -93,20 +94,23 @@ def stream_live(
     pv_prev_after = trainer.portfolio.value(0.0)
 
     while True:
-        frame = compute_indicators(feed.fetch())
+        raw_frame, _ = feed.fetch()
+        frame = compute_indicators(raw_frame)
         if frame.empty:
             if delay > 0:
                 time.sleep(delay)
             continue
 
-        for _, row in frame.iterrows():
+        for i in range(max(0, len(frame) - 1)):
+            row = frame.iloc[i]
+            next_row = frame.iloc[i + 1]
             ts = row.get("timestamp")
             if last_ts is not None and ts is not None and ts <= last_ts:
                 continue
 
             price = float(row["close"])
             before_trade_value = trainer.portfolio.value(price)
-            result = trainer.step(row, idx)
+            result = trainer.step(row, next_row, idx)
             after_trade_value = trainer.portfolio.value(price)
             trade_impact = after_trade_value - before_trade_value
             mtm_delta = after_trade_value - pv_prev_after
@@ -157,7 +161,7 @@ def main() -> None:
     if args.continuous:
         loop = stream_live(trainer, feed, args.delay)
     else:
-        raw_frame = feed.fetch()
+        raw_frame, _ = feed.fetch()
         feature_frame = compute_indicators(raw_frame)
         loop = run_loop(trainer, feature_frame, args.steps, args.duration, args.delay)
 
@@ -184,6 +188,7 @@ def main() -> None:
                             cash=trainer.portfolio.cash,
                             position=trainer.portfolio.position,
                             success_rate=trainer.success_rate,
+                            step_win_rate=trainer.success_rate,
                             total_reward=trainer.agent.state.total_reward,
                             trainer_reward=result.trainer_reward,
                             mtm_delta=mtm_delta,
@@ -231,6 +236,7 @@ def main() -> None:
                             cash=trainer.portfolio.cash,
                             position=trainer.portfolio.position,
                             success_rate=trainer.success_rate,
+                            step_win_rate=trainer.success_rate,
                             total_reward=trainer.agent.state.total_reward,
                             trainer_reward=result.trainer_reward,
                             mtm_delta=mtm_delta,

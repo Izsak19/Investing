@@ -28,22 +28,27 @@ class DataFeed:
     def __init__(self, config: MarketConfig):
         self.config = config
         self._exchange: Optional[object] = None
+        self._warned_synthetic = False
         if not config.offline and ccxt is not None:
             try:
-                self._exchange = ccxt.binance()
+                self._exchange = ccxt.binance({"enableRateLimit": True})
             except Exception:
                 self._exchange = None
 
-    def fetch(self) -> pd.DataFrame:
+    def fetch(self) -> tuple[pd.DataFrame, bool]:
         if self._exchange:
             try:
                 ohlcv = self._exchange.fetch_ohlcv(
                     self.config.symbol, timeframe=self.config.timeframe, limit=self.config.limit
                 )
-                return self._to_dataframe(ohlcv)
+                return self._to_dataframe(ohlcv), True
             except Exception:
                 pass
-        return self._generate_synthetic()
+        frame = self._generate_synthetic()
+        if not self._warned_synthetic:
+            print("[data] Using synthetic candles (live feed unavailable or offline mode).")
+            self._warned_synthetic = True
+        return frame, False
 
     def _to_dataframe(self, ohlcv: list[list[float]]) -> pd.DataFrame:
         frame = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])

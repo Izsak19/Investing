@@ -71,7 +71,7 @@
           <span id="positionValue">--</span>
         </div>
         <div class="metric">
-          <h3>Success Rate</h3>
+          <h3>Step Win Rate</h3>
           <span id="successRate">--</span>
         </div>
         <div class="metric">
@@ -158,7 +158,8 @@
         document.getElementById("portfolioValue").textContent = (metrics.portfolio_value || 0).toFixed(2);
         document.getElementById("cashValue").textContent = (metrics.cash || 0).toFixed(2);
         document.getElementById("positionValue").textContent = (metrics.position || 0).toFixed(6);
-        document.getElementById("successRate").textContent = `${(metrics.success_rate || 0).toFixed(2)}%`;
+        const winRate = metrics.step_win_rate ?? metrics.success_rate ?? 0;
+        document.getElementById("successRate").textContent = `${winRate.toFixed(2)}%`;
         document.getElementById("totalReward").textContent = (metrics.total_reward || 0).toFixed(2);
         document.getElementById("trainerReward").textContent = (metrics.trainer_reward || 0).toFixed(4);
         document.getElementById("mtmDelta").textContent = (metrics.mtm_delta || 0).toFixed(4);
@@ -240,6 +241,7 @@
           merged.refill_count ??= latestEvent.refill_count;
           merged.executed_trades ??= latestEvent.executed_trades;
           merged.sell_win_rate ??= latestEvent.sell_win_rate;
+          merged.step_win_rate ??= latestEvent.step_win_rate ?? latestEvent.success_rate;
           merged.success_rate ??= latestEvent.success_rate;
           merged.total_reward ??= latestEvent.total_reward;
         }

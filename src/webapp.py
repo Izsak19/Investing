@@ -30,6 +30,7 @@ class TradeEvent:
     refilled: bool
     refill_count: int
     success_rate: float
+    step_win_rate: float
     total_reward: float
     portfolio_value: float
     cash: float
@@ -105,6 +106,7 @@ class WebDashboard:
         cash: float,
         position: float,
         success_rate: float,
+        step_win_rate: float,
         total_reward: float,
         *,
         trainer_reward: float,
@@ -138,6 +140,7 @@ class WebDashboard:
                 refilled=bool(refilled),
                 refill_count=int(refill_count),
                 success_rate=float(success_rate),
+                step_win_rate=float(step_win_rate),
                 total_reward=float(total_reward),
                 portfolio_value=float(portfolio_value),
                 cash=float(cash),
@@ -148,6 +151,7 @@ class WebDashboard:
             self._events.append(event)
             self._latest_metrics = {
                 "success_rate": float(success_rate),
+                "step_win_rate": float(step_win_rate),
                 "total_reward": float(total_reward),
                 "portfolio_value": float(portfolio_value),
                 "cash": float(cash),
