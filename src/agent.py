@@ -96,6 +96,7 @@ class BanditAgent:
         features: np.ndarray,
         *,
         actual_reward: float | None = None,
+        trade_executed: bool = True,
     ) -> None:
         safe_features = self._sanitize(features)
         idx = ACTIONS.index(action)
@@ -106,7 +107,8 @@ class BanditAgent:
         self.state.weights[idx] = list(bounded)
         self.state.q_values = list(self._estimate_rewards(safe_features))
         self.state.total_reward += reward if actual_reward is None else actual_reward
-        self.state.trades += 1
+        if trade_executed:
+            self.state.trades += 1
 
     def save(self) -> None:
         self.state.to_json(Path(config.STATE_PATH))

@@ -49,6 +49,8 @@ class Trainer:
         features = raw_features / price_scale
         action = self.agent.act(features)
         reward = 0.0
+        trade_executed = False
+        trade_penalty = 0.0
 
         # Naive execution model. Rewards are always computed on net proceeds
         # after fees so the agent learns the true cost of transacting. Buying
@@ -56,28 +58,43 @@ class Trainer:
         # incorporates both the buy and sell fees because the cost basis is
         # fee-adjusted.
         if action == "buy" and self.portfolio.cash > 0:
+            trade_executed = True
             fee = self.portfolio.cash * config.FEE_RATE
             investable = self.portfolio.cash - fee
+            trade_penalty = investable * config.TURNOVER_PENALTY
             self.portfolio.position = investable / price
             # Track effective cost basis per unit including the buy fee
             self.portfolio.entry_price = price / (1 - config.FEE_RATE)
             self.portfolio.cash = 0.0
         elif action == "sell" and self.portfolio.position > 0:
+            trade_executed = True
             gross_proceeds = self.portfolio.position * price
             fee = gross_proceeds * config.FEE_RATE
             net_proceeds = gross_proceeds - fee
-            reward = net_proceeds - self.portfolio.entry_price * self.portfolio.position
+            trade_penalty = gross_proceeds * config.TURNOVER_PENALTY
+            reward = net_proceeds - self.portfolio.entry_price * self.portfolio.position - trade_penalty
             self.portfolio.cash = net_proceeds
             self.portfolio.position = 0.0
             self.portfolio.entry_price = 0.0
         else:
             reward = (price - self.portfolio.entry_price) * self.portfolio.position
 
-        # Bound the learning signal so weight updates stay within a stable range
-        # even when raw P&L swings are large. The actual reward is still tracked
-        # for reporting, but the bandit learns from the scaled value.
-        scaled_reward = math.tanh(reward / max(price, 1e-6))
-        self.agent.update(action, scaled_reward, features, actual_reward=reward)
+        # Include a small penalty for each executed trade to discourage churn and
+        # approximate slippage beyond explicit exchange fees.
+        if trade_penalty and action == "buy":
+            reward -= trade_penalty
+
+        # Normalize reward by exposure so updates reflect percentage returns and
+        # stay bounded during long runs.
+        exposure = max(abs(self.portfolio.position * price), price, 1e-6)
+        scaled_reward = math.tanh(reward / exposure)
+        self.agent.update(
+            action,
+            scaled_reward,
+            features,
+            actual_reward=reward,
+            trade_executed=trade_executed,
+        )
         self.history.append((step_idx, action, price, reward))
         self.total_trades += 1
         if reward > 0:
