@@ -50,6 +50,22 @@ class BanditAgent:
         self._feature_size = len(INDICATOR_COLUMNS)
         self._ensure_weight_shape()
 
+    @staticmethod
+    def _sanitize(features: np.ndarray) -> np.ndarray:
+        """Clamp features to a safe numeric range and replace non-finite values.
+
+        Live market indicators can be large (price-denominated) and, over many
+        steps, weight updates can explode. Clipping keeps the dot products used
+        for Q-value estimates within floating-point limits.
+        """
+
+        clipped = np.clip(
+            np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0, copy=False),
+            -config.FEATURE_CLIP,
+            config.FEATURE_CLIP,
+        )
+        return clipped
+
     def _ensure_weight_shape(self) -> None:
         if len(self.state.weights) != len(ACTIONS):
             self.state.weights = [[0.0 for _ in range(self._feature_size)] for _ in ACTIONS]
@@ -60,7 +76,8 @@ class BanditAgent:
                 self.state.weights[i] = [0.0 for _ in range(self._feature_size)]
 
     def _estimate_rewards(self, features: np.ndarray) -> np.ndarray:
-        return np.dot(np.asarray(self.state.weights), features)
+        safe_features = self._sanitize(features)
+        return np.dot(np.asarray(self.state.weights), safe_features)
 
     def act(self, features: np.ndarray) -> str:
         estimates = self._estimate_rewards(features)
@@ -73,13 +90,14 @@ class BanditAgent:
         return choice
 
     def update(self, action: str, reward: float, features: np.ndarray) -> None:
+        safe_features = self._sanitize(features)
         idx = ACTIONS.index(action)
-        prediction = float(np.dot(self.state.weights[idx], features))
-        error = reward - prediction
-        self.state.weights[idx] = list(
-            np.asarray(self.state.weights[idx]) + config.ALPHA * error * features
-        )
-        self.state.q_values = list(self._estimate_rewards(features))
+        prediction = float(np.dot(self.state.weights[idx], safe_features))
+        error = float(np.clip(reward - prediction, -config.ERROR_CLIP, config.ERROR_CLIP))
+        updated = np.asarray(self.state.weights[idx]) + config.ALPHA * error * safe_features
+        bounded = np.clip(updated, -config.WEIGHT_CLIP, config.WEIGHT_CLIP)
+        self.state.weights[idx] = list(bounded)
+        self.state.q_values = list(self._estimate_rewards(safe_features))
         self.state.total_reward += reward
         self.state.trades += 1
 
