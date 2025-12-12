@@ -66,6 +66,15 @@ def parse_args() -> argparse.Namespace:
         default=0.0,
         help="Percentage gain on initial cash required before enabling --continuous mode (0 means breakeven).",
     )
+    parser.add_argument("--epsilon-start", type=float, default=None, help="Override EPSILON_START at runtime")
+    parser.add_argument("--epsilon-end", type=float, default=None, help="Override EPSILON_END at runtime")
+    parser.add_argument(
+        "--epsilon-decay-steps", type=int, default=None, help="Override EPSILON_DECAY_STEPS at runtime"
+    )
+    parser.add_argument(
+        "--epsilon-when-flat", type=float, default=None, help="Override EPSILON_WHEN_FLAT at runtime"
+    )
+    parser.add_argument("--eval", action="store_true", help="Run one evaluation pass without training or saving state")
     return parser.parse_args()
 
 
@@ -81,6 +90,8 @@ def run_loop(
     checkpoint_every: int,
     flush_trades_every: int,
     keep_last: int,
+    train: bool = True,
+    epsilon_override: float | None = None,
 ) -> Iterable[tuple[int, pd.Series, StepResult, float, float, float]]:
     """
     Generate trading events either for a fixed number of steps or until a duration elapses.
@@ -97,20 +108,19 @@ def run_loop(
 
     episode_len = row_count - 1
     if duration is None and steps > episode_len:
-        print(
-            "Warning: requested steps exceed available window; repeating episodes over the same data."
-        )
+        print("Warning: requested steps exceed available window; reducing to available window.")
 
     first_price = float(frame.iloc[0]["close"])
     pv_prev_after = trainer.portfolio.value(first_price)
+    effective_steps = min(steps, episode_len)
 
     while True:
-        if duration is None and idx >= steps:
+        if duration is None and idx >= effective_steps:
             break
         if duration is not None and time.monotonic() - start >= duration:
             break
 
-        i = idx % episode_len
+        i = idx % episode_len if duration is not None else idx
         row = frame.iloc[i]
         next_row = frame.iloc[i + 1]
 
@@ -120,17 +130,18 @@ def run_loop(
         price = float(row["close"])
 
         before_trade_value = trainer.portfolio.value(price)
-        result = trainer.step(row, next_row, idx)
+        result = trainer.step(row, next_row, idx, train=train, epsilon_override=epsilon_override)
         after_trade_value = trainer.portfolio.value(price)
         trade_impact = after_trade_value - before_trade_value
         mtm_delta = after_trade_value - pv_prev_after
         pv_prev_after = after_trade_value
 
-        if flush_trades_every > 0 and trainer.steps % flush_trades_every == 0:
-            trainer._flush_trades_and_metrics(run_dir)
-        if checkpoint_every > 0 and trainer.steps % checkpoint_every == 0:
-            trainer.agent.save(run_dir=run_dir, checkpoint=True, keep_last=keep_last)
-            trainer._save_trainer_state(run_dir, run_id, checkpoint=True, keep_last=keep_last)
+        if train:
+            if flush_trades_every > 0 and trainer.steps % flush_trades_every == 0:
+                trainer._flush_trades_and_metrics(run_dir)
+            if checkpoint_every > 0 and trainer.steps % checkpoint_every == 0:
+                trainer.agent.save(run_dir=run_dir, checkpoint=True, keep_last=keep_last)
+                trainer._save_trainer_state(run_dir, run_id, checkpoint=True, keep_last=keep_last)
         yield idx, row, result, after_trade_value, mtm_delta, trade_impact
 
         idx += 1
@@ -211,6 +222,10 @@ def timeframe_to_minutes(timeframe: str) -> float:
 
 def main() -> None:
     args = parse_args()
+    eval_mode = args.eval
+    if eval_mode and args.continuous:
+        print("--eval disables --continuous; running a bounded evaluation pass instead.")
+        args.continuous = False
     limit = args.limit
     if args.offline and args.duration:
         candles_for_window = math.ceil(args.duration / timeframe_to_minutes(args.timeframe))
@@ -241,7 +256,12 @@ def main() -> None:
         MarketConfig(symbol=args.symbol, timeframe=args.timeframe, limit=limit, offline=args.offline)
     )
 
-    agent = BanditAgent()
+    agent = BanditAgent(
+        epsilon_start=args.epsilon_start,
+        epsilon_end=args.epsilon_end,
+        epsilon_decay_steps=args.epsilon_decay_steps,
+        epsilon_when_flat=args.epsilon_when_flat,
+    )
     agent.state.run_id = agent.state.run_id or run_id
     agent.state.symbol = agent.state.symbol or args.symbol
     agent.state.timeframe = agent.state.timeframe or args.timeframe
@@ -311,6 +331,8 @@ def main() -> None:
     else:
         raw_frame, _ = feed.fetch()
         feature_frame = compute_indicators(raw_frame)
+        loop_checkpoint_every = 0 if eval_mode else args.checkpoint_every
+        loop_flush_every = 0 if eval_mode else args.flush_trades_every
         loop = run_loop(
             trainer,
             feature_frame,
@@ -319,13 +341,27 @@ def main() -> None:
             args.delay,
             run_id=run_id,
             run_dir=run_dir,
-            checkpoint_every=args.checkpoint_every,
-            flush_trades_every=args.flush_trades_every,
+            checkpoint_every=loop_checkpoint_every,
+            flush_trades_every=loop_flush_every,
             keep_last=args.keep_last,
+            train=not eval_mode,
+            epsilon_override=0.0 if eval_mode else None,
         )
 
     try:
-        if args.dashboard:
+        if eval_mode:
+            executed_trades = 0
+            final_value = trainer.portfolio.value(float(feature_frame.iloc[-1]["close"])) if len(feature_frame) else 0.0
+            for _, row, result, portfolio_value, _, _ in loop:
+                final_value = portfolio_value
+                if result.trade_executed:
+                    executed_trades += 1
+            sell_win_rate = trainer.trade_win_rate * 100
+            print(
+                f"Evaluation complete: portfolio value={final_value:.2f}, executed trades={executed_trades}, "
+                f"sell win rate={sell_win_rate:.2f}%"
+            )
+        elif args.dashboard:
             from src.dashboard import live_dashboard as render
 
             def enrich(events):
@@ -416,9 +452,10 @@ def main() -> None:
     except KeyboardInterrupt:
         print("Interrupted; saving agent state before exit...")
     finally:
-        trainer._flush_trades_and_metrics(run_dir, force=True)
-        trainer.agent.save(run_dir=run_dir, keep_last=args.keep_last)
-        trainer._save_trainer_state(run_dir, run_id, checkpoint=False, keep_last=args.keep_last)
+        if not eval_mode:
+            trainer._flush_trades_and_metrics(run_dir, force=True)
+            trainer.agent.save(run_dir=run_dir, keep_last=args.keep_last)
+            trainer._save_trainer_state(run_dir, run_id, checkpoint=False, keep_last=args.keep_last)
 
         if web_dashboard:
             web_dashboard.stop()
