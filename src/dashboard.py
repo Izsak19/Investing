@@ -59,8 +59,8 @@ def build_table(
 
     q_values = Table.grid(expand=True)
     q_values.add_row("Q-values", ", ".join(f"{a}:{v:.3f}" for a, v in zip(ACTIONS, agent.state.q_values)))
-    epsilon = agent.state.last_epsilon if hasattr(agent, "state") else config.EPSILON
-    table.add_row("Exploration (eps)", f"{epsilon:.2f}")
+    posterior_scale = agent.state.last_epsilon if hasattr(agent, "state") else config.POSTERIOR_SCALE
+    table.add_row("Sampling Scale", f"{posterior_scale:.2f}")
     if action_distribution:
         dist_str = ", ".join(f"{k}:{v:.1%}" for k, v in action_distribution.items())
         table.add_row("Action Mix", dist_str)

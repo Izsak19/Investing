@@ -15,7 +15,7 @@ import pandas as pd
 from src.agent import AgentState, BanditAgent
 from src import config
 from src.indicators import INDICATOR_COLUMNS
-from src.metrics import compute_max_drawdown, compute_sharpe_ratio, rolling_volatility, total_return
+from src.metrics import compute_max_drawdown, compute_sharpe_ratio, total_return
 from src.persistence import atomic_write_json
 from src.timeframe import periods_per_year
 
@@ -145,9 +145,10 @@ class Trainer:
         self.last_entry_step = -1
         self.last_data_is_live: bool | None = None
         self._equity_curve: list[float] = []
-        self._return_history: deque[float] = deque(maxlen=config.RISK_VOL_WINDOW)
+        self._return_history: deque[float] = deque(maxlen=config.RETURN_HISTORY_WINDOW)
         self._recent_actions: deque[str] = deque(maxlen=config.ACTION_HISTORY_WINDOW)
         self._action_counter: Counter[str] = Counter()
+        self._turnover_window: deque[float] = deque(maxlen=config.TURNOVER_BUDGET_WINDOW)
         self.timeframe = timeframe or agent.state.timeframe or config.DEFAULT_TIMEFRAME
         self.periods_per_year = periods_per_year(self.timeframe)
 
@@ -160,6 +161,7 @@ class Trainer:
         self.last_entry_step = -1
         self._equity_curve.clear()
         self._return_history.clear()
+        self._turnover_window.clear()
 
     def export_state(self, run_id: str) -> TrainerState:
         return TrainerState(
@@ -240,7 +242,7 @@ class Trainer:
         step_idx: int,
         *,
         train: bool = True,
-        epsilon_override: float | None = None,
+        posterior_scale_override: float | None = None,
     ) -> StepResult:
         price_now = float(row["close"])
         price_next = float(next_row["close"])
@@ -259,12 +261,16 @@ class Trainer:
             allowed_actions.append("buy")
 
         action = self.agent.act(
-            features, allowed=allowed_actions, step=self.steps, epsilon_override=epsilon_override
+            features,
+            allowed=allowed_actions,
+            step=self.steps,
+            posterior_scale_override=posterior_scale_override,
         )
         trade_executed = False
         fee_paid = 0.0
         turnover_penalty = 0.0
         realized_pnl = 0.0
+        notional_traded = 0.0
 
         value_before = self.portfolio.value(price_now)
         position_before = self.portfolio.position
@@ -284,6 +290,7 @@ class Trainer:
             gross_outlay = trade_cash + turnover_penalty
             if investable > 0 and gross_outlay <= cash_before:
                 trade_executed = True
+                notional_traded = gross_outlay
                 trade_size = investable / price_now
                 prior_position = self.portfolio.position
                 prior_cost_basis = prior_position * self.portfolio.entry_price
@@ -306,6 +313,7 @@ class Trainer:
             gross_proceeds = position_before * price_now
             fee_paid = gross_proceeds * config.FEE_RATE
             turnover_penalty = gross_proceeds * config.TURNOVER_PENALTY
+            notional_traded = gross_proceeds
             net = gross_proceeds - fee_paid - turnover_penalty
             self.portfolio.cash = net
             self.portfolio.position = 0.0
@@ -320,8 +328,20 @@ class Trainer:
         reward = value_next - value_before
         step_return = reward / max(value_before, 1e-6)
         self._return_history.append(step_return)
-        vol_penalty = rolling_volatility(self._return_history) * config.RISK_VOL_PENALTY
-        risk_penalty_value = vol_penalty * self.initial_cash
+        self._turnover_window.append(notional_traded)
+
+        prospective_curve = self._equity_curve + [value_next]
+        drawdown = compute_max_drawdown(prospective_curve)
+        drawdown_over = max(0.0, drawdown - config.DRAWDOWN_BUDGET)
+        drawdown_penalty_value = drawdown_over * self.initial_cash * config.DRAWDOWN_PENALTY
+
+        turnover_budget = self.initial_cash * config.TURNOVER_BUDGET_MULTIPLIER
+        turnover_over = max(0.0, sum(self._turnover_window) - turnover_budget)
+        turnover_penalty_value = (
+            (turnover_over / max(turnover_budget, 1e-6)) * self.initial_cash * config.TURNOVER_BUDGET_PENALTY
+        )
+
+        risk_penalty_value = drawdown_penalty_value + turnover_penalty_value
         trainer_reward = reward - risk_penalty_value
 
         # Normalize reward by initial capital to avoid runaway scales on long episodes.
@@ -388,6 +408,9 @@ class Trainer:
             self.portfolio.cash = self.initial_cash
             self.portfolio.entry_price = 0.0
             self.portfolio.entry_value = 0.0
+            self._equity_curve.clear()
+            self._return_history.clear()
+            self._turnover_window.clear()
             self.refill_count += 1
             return True
         return False

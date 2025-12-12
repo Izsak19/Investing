@@ -27,7 +27,7 @@ class AgentState:
     trades: int = 0
     steps_seen: int = 0
     last_epsilon: float = 0.0
-    version: int = 3
+    version: int = 4
     run_id: str = ""
     symbol: str = ""
     timeframe: str = ""
@@ -36,7 +36,7 @@ class AgentState:
     feature_clip: float = config.FEATURE_CLIP
     weight_clip: float = config.WEIGHT_CLIP
     ridge_factor: float = config.RIDGE_FACTOR
-    ucb_scale: float = config.UCB_SCALE
+    posterior_scale: float = config.POSTERIOR_SCALE
     indicator_columns: list[str] = field(default_factory=lambda: FEATURE_COLUMNS[:])
 
     @classmethod
@@ -49,7 +49,7 @@ class AgentState:
                 for _ in ACTIONS
             ],
             bias_vectors=[[0.0 for _ in FEATURE_COLUMNS] for _ in ACTIONS],
-            last_epsilon=config.EPSILON_START,
+            last_epsilon=config.POSTERIOR_SCALE,
             indicator_columns=FEATURE_COLUMNS[:],
         )
 
@@ -76,12 +76,12 @@ class AgentState:
         if "steps_seen" not in data:
             data["steps_seen"] = 0
         if "last_epsilon" not in data:
-            data["last_epsilon"] = config.EPSILON_START
+            data["last_epsilon"] = config.POSTERIOR_SCALE
         if "trades" not in data:
             data["trades"] = 0
         if "total_reward" not in data:
             data["total_reward"] = 0.0
-        data.setdefault("version", 2)
+        data.setdefault("version", 4)
         data.setdefault("run_id", "")
         data.setdefault("symbol", "")
         data.setdefault("timeframe", "")
@@ -90,31 +90,25 @@ class AgentState:
         data.setdefault("feature_clip", config.FEATURE_CLIP)
         data.setdefault("weight_clip", config.WEIGHT_CLIP)
         data.setdefault("ridge_factor", config.RIDGE_FACTOR)
-        data.setdefault("ucb_scale", config.UCB_SCALE)
+        data.setdefault("posterior_scale", config.POSTERIOR_SCALE)
+        data.pop("ucb_scale", None)
         data.setdefault("indicator_columns", FEATURE_COLUMNS[:])
         return cls(**data)
 
 
 class BanditAgent:
-    """Contextual bandit with LinUCB-style uncertainty-aware exploration."""
+    """Contextual bandit that uses Thompson sampling for exploration."""
 
     def __init__(
         self,
         *,
-        epsilon_start: float | None = None,
-        epsilon_end: float | None = None,
-        epsilon_decay_steps: int | None = None,
-        epsilon_when_flat: float | None = None,
+        posterior_scale: float | None = None,
     ):
         self.state = AgentState.from_json(Path(config.STATE_PATH))
-        self.epsilon_start = epsilon_start if epsilon_start is not None else config.EPSILON_START
-        self.epsilon_end = epsilon_end if epsilon_end is not None else config.EPSILON_END
-        self.epsilon_decay_steps = (
-            epsilon_decay_steps if epsilon_decay_steps is not None else config.EPSILON_DECAY_STEPS
+        self.posterior_scale = (
+            posterior_scale if posterior_scale is not None else self.state.posterior_scale
         )
-        self.epsilon_when_flat = (
-            epsilon_when_flat if epsilon_when_flat is not None else config.EPSILON_WHEN_FLAT
-        )
+        self.state.posterior_scale = self.posterior_scale
         self._prepare_state()
 
     @staticmethod
@@ -212,16 +206,27 @@ class BanditAgent:
         safe_features = self._sanitize(features)
         return np.dot(np.asarray(self.state.weights), safe_features)
 
-    def _ucb_scores(self, features: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def _thompson_scores(self, features: np.ndarray, *, scale: float) -> tuple[np.ndarray, np.ndarray]:
         safe_features = self._sanitize(features)
         means = np.dot(np.asarray(self.state.weights), safe_features)
-        bonus_terms: list[float] = []
+        sampled_scores: list[float] = []
+
         for idx in range(len(ACTIONS)):
+            mean = np.asarray(self.state.weights[idx], dtype=float)
             cov_inv = np.asarray(self.state.cov_inv_matrices[idx], dtype=float)
-            variance = float(np.dot(safe_features, cov_inv @ safe_features))
-            bonus = float(self.state.ucb_scale * np.sqrt(max(variance, 0.0)))
-            bonus_terms.append(bonus)
-        return means + np.asarray(bonus_terms), means
+            covariance = cov_inv * max(scale, 0.0)
+            covariance = 0.5 * (covariance + covariance.T)
+            if scale <= 0:
+                draw = mean
+            else:
+                jitter = np.eye(self._feature_size, dtype=float) * 1e-6
+                try:
+                    draw = np.random.multivariate_normal(mean, covariance)
+                except np.linalg.LinAlgError:
+                    draw = np.random.multivariate_normal(mean, covariance + jitter)
+            sampled_scores.append(float(np.dot(draw, safe_features)))
+
+        return np.asarray(sampled_scores), means
 
     def _prepare_state(self) -> None:
         self._feature_size = len(self.state.indicator_columns) or len(FEATURE_COLUMNS)
@@ -237,43 +242,27 @@ class BanditAgent:
             self.state.weights = [[0.0 for _ in range(self._feature_size)] for _ in ACTIONS]
         self._recompute_weights()
 
-    def current_epsilon(self, step: int | None = None) -> float:
-        t = step if step is not None else self.state.steps_seen
-        progress = min(1.0, t / self.epsilon_decay_steps)
-        epsilon = max(
-            self.epsilon_end,
-            self.epsilon_start + (self.epsilon_end - self.epsilon_start) * progress,
-        )
-        return float(epsilon)
-
     def act(
         self,
         features: np.ndarray,
         *,
         allowed: list[str] | None = None,
         step: int | None = None,
-        epsilon_override: float | None = None,
+        posterior_scale_override: float | None = None,
     ) -> str:
-        ucb_scores, means = self._ucb_scores(features)
-        self.state.q_values = list(means)
-
         actions = allowed if allowed is not None else ACTIONS
 
-        epsilon = epsilon_override if epsilon_override is not None else self.current_epsilon(step)
-        is_flat = "buy" in actions and "sell" not in actions
-        if (
-            epsilon_override is None
-            and is_flat
-            and self.state.steps_seen < config.FLAT_EXPLORATION_WARMUP_STEPS
-            and self.epsilon_when_flat > 0
-        ):
-            epsilon = max(epsilon, self.epsilon_when_flat)
-        self.state.last_epsilon = epsilon
+        sample_scale = (
+            posterior_scale_override
+            if posterior_scale_override is not None
+            else self.posterior_scale
+        )
+        sample_scale = max(sample_scale, config.POSTERIOR_SCALE_MIN)
+        sampled_scores, means = self._thompson_scores(features, scale=sample_scale)
+        self.state.q_values = list(means)
+        self.state.last_epsilon = sample_scale
 
-        if np.random.random() < epsilon:
-            return str(np.random.choice(actions))
-
-        allowed_scores = {action: ucb_scores[ACTIONS.index(action)] for action in actions}
+        allowed_scores = {action: sampled_scores[ACTIONS.index(action)] for action in actions}
         best_score = max(allowed_scores.values())
         candidates = [action for action, value in allowed_scores.items() if value == best_score]
         return str(np.random.choice(candidates))
