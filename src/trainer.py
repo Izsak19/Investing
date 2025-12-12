@@ -23,6 +23,17 @@ class Portfolio:
         return self.cash + self.position * price
 
 
+@dataclass
+class StepResult:
+    action: str
+    trainer_reward: float
+    scaled_reward: float
+    trade_executed: bool
+    fee_paid: float
+    turnover_penalty: float
+    refilled: bool
+
+
 class Trainer:
     def __init__(
         self,
@@ -37,10 +48,16 @@ class Trainer:
         self.successful_trades: int = 0
         self.initial_cash = initial_cash
         self.min_cash = min_cash
+        self.refill_count = 0
+        self.total_fee_paid = 0.0
+        self.total_turnover_penalty_paid = 0.0
+        self.steps = 0
+        self.sell_trades = 0
+        self.winning_sells = 0
 
-    def step(self, row: pd.Series, step_idx: int) -> None:
+    def step(self, row: pd.Series, step_idx: int) -> StepResult:
         price = float(row["close"])
-        self._maybe_refill_portfolio()
+        refilled = self._maybe_refill_portfolio()
         raw_features = row[INDICATOR_COLUMNS].to_numpy(dtype=float)
         # Normalize indicators by the current close so the bandit sees mostly
         # unit-scale inputs instead of raw price-denominated values that can
@@ -51,6 +68,8 @@ class Trainer:
         reward = 0.0
         trade_executed = False
         trade_penalty = 0.0
+        fee_paid = 0.0
+        turnover_penalty = 0.0
 
         # Naive execution model. Rewards are always computed on net proceeds
         # after fees so the agent learns the true cost of transacting. Buying
@@ -59,9 +78,10 @@ class Trainer:
         # fee-adjusted.
         if action == "buy" and self.portfolio.cash > 0:
             trade_executed = True
-            fee = self.portfolio.cash * config.FEE_RATE
-            investable = self.portfolio.cash - fee
-            trade_penalty = investable * config.TURNOVER_PENALTY
+            fee_paid = self.portfolio.cash * config.FEE_RATE
+            investable = self.portfolio.cash - fee_paid
+            turnover_penalty = investable * config.TURNOVER_PENALTY
+            trade_penalty = turnover_penalty
             self.portfolio.position = investable / price
             # Track effective cost basis per unit including the buy fee
             self.portfolio.entry_price = price / (1 - config.FEE_RATE)
@@ -69,9 +89,10 @@ class Trainer:
         elif action == "sell" and self.portfolio.position > 0:
             trade_executed = True
             gross_proceeds = self.portfolio.position * price
-            fee = gross_proceeds * config.FEE_RATE
-            net_proceeds = gross_proceeds - fee
-            trade_penalty = gross_proceeds * config.TURNOVER_PENALTY
+            fee_paid = gross_proceeds * config.FEE_RATE
+            net_proceeds = gross_proceeds - fee_paid
+            turnover_penalty = gross_proceeds * config.TURNOVER_PENALTY
+            trade_penalty = turnover_penalty
             reward = net_proceeds - self.portfolio.entry_price * self.portfolio.position - trade_penalty
             self.portfolio.cash = net_proceeds
             self.portfolio.position = 0.0
@@ -99,8 +120,25 @@ class Trainer:
         self.total_trades += 1
         if reward > 0:
             self.successful_trades += 1
+        self.steps += 1
+        self.total_fee_paid += fee_paid
+        self.total_turnover_penalty_paid += turnover_penalty
+        if action == "sell" and trade_executed:
+            self.sell_trades += 1
+            if reward > 0:
+                self.winning_sells += 1
 
-    def _maybe_refill_portfolio(self) -> None:
+        return StepResult(
+            action=action,
+            trainer_reward=reward,
+            scaled_reward=scaled_reward,
+            trade_executed=trade_executed,
+            fee_paid=fee_paid,
+            turnover_penalty=turnover_penalty,
+            refilled=refilled,
+        )
+
+    def _maybe_refill_portfolio(self) -> bool:
         """
         Reset the paper trading balance after the agent burns through its cash.
 
@@ -112,17 +150,24 @@ class Trainer:
         """
 
         if self.portfolio.position > 0:
-            return
+            return False
 
         if self.portfolio.cash < self.min_cash:
             self.portfolio.cash = self.initial_cash
             self.portfolio.entry_price = 0.0
+            self.refill_count += 1
+            return True
+        return False
 
     @property
     def success_rate(self) -> float:
         if self.total_trades == 0:
             return 0.0
         return (self.successful_trades / self.total_trades) * 100
+
+    @property
+    def trade_win_rate(self) -> float:
+        return self.winning_sells / max(1, self.sell_trades)
 
     def run(self, frame: pd.DataFrame, max_steps: int | None = None) -> None:
         steps = max_steps if max_steps is not None else len(frame)
