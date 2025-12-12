@@ -29,6 +29,8 @@ class TradeEvent:
     turnover_penalty: float
     refilled: bool
     refill_count: int
+    success_rate: float
+    total_reward: float
     portfolio_value: float
     cash: float
     position: float
@@ -135,6 +137,8 @@ class WebDashboard:
                 turnover_penalty=float(turnover_penalty),
                 refilled=bool(refilled),
                 refill_count=int(refill_count),
+                success_rate=float(success_rate),
+                total_reward=float(total_reward),
                 portfolio_value=float(portfolio_value),
                 cash=float(cash),
                 position=float(position),

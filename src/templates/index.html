@@ -149,6 +149,7 @@
       };
 
       let lastId = -1;
+      let latestMetrics = null;
       const POLL_INTERVAL_MS = 1000;
       const statusEl = document.getElementById("status");
 
@@ -185,7 +186,7 @@
           x: [[]],
           y: [[]],
           text: [[]],
-          marker: { color: [[]] },
+          "marker.color": [[]],
         };
 
         const portfolioUpdate = {
@@ -206,7 +207,7 @@
           actionUpdate.x[0].push(label);
           actionUpdate.y[0].push(evt.close);
           actionUpdate.text[0].push(`${evt.action.toUpperCase()} @ ${evt.close.toFixed(2)}`);
-          actionUpdate.marker.color[0].push(actionColor);
+          actionUpdate["marker.color"][0].push(actionColor);
 
           portfolioUpdate.x[0].push(label);
           portfolioUpdate.y[0].push(evt.portfolio_value);
@@ -217,6 +218,36 @@
         Plotly.extendTraces("chart", portfolioUpdate, [2], history);
       }
 
+      function mergeMetrics(payload) {
+        const hasMetrics = payload.metrics && Object.keys(payload.metrics).length > 0;
+        const latestEvent = payload.events && payload.events.length > 0 ? payload.events[payload.events.length - 1] : null;
+        const merged = { ...(latestMetrics || {}) };
+
+        if (hasMetrics) {
+          Object.assign(merged, payload.metrics);
+        }
+
+        if (latestEvent) {
+          merged.portfolio_value ??= latestEvent.portfolio_value;
+          merged.cash ??= latestEvent.cash;
+          merged.position ??= latestEvent.position;
+          merged.trainer_reward ??= latestEvent.trainer_reward;
+          merged.mtm_delta ??= latestEvent.mtm_delta;
+          merged.trade_impact ??= latestEvent.trade_impact;
+          merged.fee_paid ??= latestEvent.fee_paid;
+          merged.turnover_penalty ??= latestEvent.turnover_penalty;
+          merged.refilled ??= latestEvent.refilled;
+          merged.refill_count ??= latestEvent.refill_count;
+          merged.executed_trades ??= latestEvent.executed_trades;
+          merged.sell_win_rate ??= latestEvent.sell_win_rate;
+          merged.success_rate ??= latestEvent.success_rate;
+          merged.total_reward ??= latestEvent.total_reward;
+        }
+
+        latestMetrics = merged;
+        return merged;
+      }
+
       async function pollOnce() {
         try {
           const res = await fetch(`/api/events?since=${lastId}`, { cache: "no-store" });
@@ -224,7 +255,8 @@
           const payload = await res.json();
           lastId = payload.last_id ?? lastId;
           updateChart(payload.events);
-          updateMetrics(payload.metrics);
+          const mergedMetrics = mergeMetrics(payload);
+          updateMetrics(mergedMetrics);
           statusEl.textContent = `Last update: ${new Date().toLocaleTimeString()}`;
         } catch (err) {
           console.error("Poll failed", err);
