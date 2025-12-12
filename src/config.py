@@ -20,23 +20,22 @@ MIN_TRAINING_CASH = 50.0
 ALPHA = 0.1  # retained for backwards compatibility with saved state
 GAMMA = 0.9  # retained for backwards compatibility with saved state
 USE_TD = True
-# LinUCB-style exploration bonus multiplier; higher means more exploration when
-# the agent is uncertain about a context-action pair.
-UCB_SCALE = 0.5
 # Strength of the L2 prior (lambda * I) on the design matrix; higher values make
 # the posterior more conservative and slow down updates early in training.
 RIDGE_FACTOR = 1.0
-EPSILON = 0.05  # rare random exploration to escape local optima
-EPSILON_START = 0.05
-EPSILON_END = 0.01
-EPSILON_DECAY_STEPS = 200_000
+# Scale applied to the posterior covariance when drawing Thompson samples; lower
+# values reduce exploration, higher values increase it.
+POSTERIOR_SCALE = 0.35
+POSTERIOR_SCALE_MIN = 0.0
 
-# Reward scaling and exploration tweaks
+# Reward scaling and risk budgets
 REWARD_SCALE = 50.0  # scales pct-return before tanh; tune 20–200
-EPSILON_WHEN_FLAT = 0.05  # exploration floor when not in position
-FLAT_EXPLORATION_WARMUP_STEPS = 20_000
-RISK_VOL_WINDOW = 200  # steps to use when estimating volatility for risk-adjusted rewards
-RISK_VOL_PENALTY = 0.25  # multiplier applied to rolling volatility when shaping rewards
+DRAWDOWN_BUDGET = 0.12  # fraction of equity allowed before penalties apply
+DRAWDOWN_PENALTY = 0.75  # capital-scaled penalty for exceeding drawdown budget
+TURNOVER_BUDGET_MULTIPLIER = 1.2  # notional traded allowed (as a multiple of initial cash) in the window
+TURNOVER_BUDGET_WINDOW = 500  # steps to accumulate turnover before applying budget penalty
+TURNOVER_BUDGET_PENALTY = 0.25  # capital-scaled penalty for exceeding turnover budget
+RETURN_HISTORY_WINDOW = 200  # rolling window for return- and volatility-aware metrics
 
 # Numerical stability safeguards
 # Caps for feature values and weights to prevent floating-point overflow when

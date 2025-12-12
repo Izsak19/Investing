@@ -65,7 +65,7 @@ python main.py --dashboard --warmup-hours 2 --warmup-profit-target 0.5 --continu
 The code implements a lean version of the typical ML lifecycle:
 1. **Data ingestion** — `DataFeed` pulls live candles or generates synthetic data.
 2. **Feature engineering** — `compute_indicators` adds MA/EMA/WMA/BOLL/VWAP/ATR/TRIX/SAR/SuperTrend columns.
-3. **Policy/action selection** — `BanditAgent` picks *sell/hold/buy* via a LinUCB contextual policy that explores where it's uncertain.
+3. **Policy/action selection** — `BanditAgent` picks *sell/hold/buy* via Thompson-sampled linear rewards that naturally balance exploration and exploitation.
 4. **Execution & reward** — `Trainer` simulates trades, computes reward as realized/unrealized PnL.
 5. **Learning update** — Online Sherman–Morrison updates keep the linear posterior fresh without full matrix inversions.
 6. **Logging/persistence** — agent state saved to `data/state.json`, trades to `data/trades.csv`.
@@ -77,7 +77,7 @@ The code implements a lean version of the typical ML lifecycle:
 - **Minimal footprint:** All data lives in `data/` to keep the flow simple and PyCharm-friendly.
 
 ## Suggested model/strategy
-- The default **uncertainty-aware contextual bandit** uses LinUCB to prefer high-reward contexts while cautiously probing unfamiliar regions instead of churning trades at random.
+- The default **uncertainty-aware contextual bandit** uses Thompson sampling over a linear posterior to favor high-reward contexts while still probing unfamiliar regions without a global epsilon.
 - You can experiment with contextual features (e.g., normalized indicators) to condition actions, or swap in a small policy-gradient model if you need more expressiveness.
 
 ## Step-by-step model training strategy
@@ -104,9 +104,9 @@ Follow this command-first recipe to train and iterate quickly.
    - Replays the last 24h until it reaches +0.25% profit or the warmup hours elapse, then rolls into live streaming.
 
 4. **Short live training cycle** (1–2h)
-   Great for tuning hyperparameters such as `--epsilon-start` (rare random escapes), `UCB_SCALE` (exploration bonus), and `--delay` (UI cadence).
+   Great for tuning hyperparameters such as `--posterior-scale` (exploration temperature) and `--delay` (UI cadence).
    ```bash
-   python main.py --dashboard --steps 120 --epsilon-start 0.05 --delay 1
+   python main.py --dashboard --steps 120 --posterior-scale 0.35 --delay 1
    ```
 
 5. **Extended live training** (half/whole day)  

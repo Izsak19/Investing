@@ -71,13 +71,11 @@ def parse_args() -> argparse.Namespace:
         default=0.0,
         help="Percentage gain on initial cash required before enabling --continuous mode (0 means breakeven).",
     )
-    parser.add_argument("--epsilon-start", type=float, default=None, help="Override EPSILON_START at runtime")
-    parser.add_argument("--epsilon-end", type=float, default=None, help="Override EPSILON_END at runtime")
     parser.add_argument(
-        "--epsilon-decay-steps", type=int, default=None, help="Override EPSILON_DECAY_STEPS at runtime"
-    )
-    parser.add_argument(
-        "--epsilon-when-flat", type=float, default=None, help="Override EPSILON_WHEN_FLAT at runtime"
+        "--posterior-scale",
+        type=float,
+        default=None,
+        help="Override POSTERIOR_SCALE used for Thompson sampling (0 disables sampling).",
     )
     parser.add_argument("--eval", action="store_true", help="Run one evaluation pass without training or saving state")
     return parser.parse_args()
@@ -97,7 +95,7 @@ def run_loop(
     keep_last: int,
     data_is_live: bool = False,
     train: bool = True,
-    epsilon_override: float | None = None,
+    posterior_scale_override: float | None = None,
 ) -> Iterable[tuple[int, pd.Series, StepResult, float, float, float]]:
     """
     Generate trading events either for a fixed number of steps or until a duration elapses.
@@ -137,7 +135,9 @@ def run_loop(
         price = float(row["close"])
 
         before_trade_value = trainer.portfolio.value(price)
-        result = trainer.step(row, next_row, idx, train=train, epsilon_override=epsilon_override)
+        result = trainer.step(
+            row, next_row, idx, train=train, posterior_scale_override=posterior_scale_override
+        )
         after_trade_value = trainer.portfolio.value(price)
         trade_impact = after_trade_value - before_trade_value
         mtm_delta = after_trade_value - pv_prev_after
@@ -269,12 +269,7 @@ def main() -> None:
         )
     )
 
-    agent = BanditAgent(
-        epsilon_start=args.epsilon_start,
-        epsilon_end=args.epsilon_end,
-        epsilon_decay_steps=args.epsilon_decay_steps,
-        epsilon_when_flat=args.epsilon_when_flat,
-    )
+    agent = BanditAgent(posterior_scale=args.posterior_scale)
     agent.state.run_id = agent.state.run_id or run_id
     agent.state.symbol = agent.state.symbol or args.symbol
     agent.state.timeframe = agent.state.timeframe or args.timeframe
@@ -358,7 +353,7 @@ def main() -> None:
             keep_last=args.keep_last,
             data_is_live=is_live,
             train=not eval_mode,
-            epsilon_override=0.0 if eval_mode else None,
+            posterior_scale_override=0.0 if eval_mode else None,
         )
 
     try:

@@ -159,7 +159,7 @@ def evaluate_agent(
         row = frame.iloc[idx]
         next_row = frame.iloc[idx + 1]
         price_now = float(row["close"])
-        result = eval_trainer.step(row, next_row, idx, train=False, epsilon_override=0.0)
+        result = eval_trainer.step(row, next_row, idx, train=False, posterior_scale_override=0.0)
         executed_trades += 1 if result.trade_executed else 0
         realized_pnl += result.realized_pnl
         equity_curve.append(eval_trainer.portfolio.value(price_now))
