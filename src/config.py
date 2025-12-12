@@ -25,5 +25,9 @@ FEATURE_CLIP = 10.0
 WEIGHT_CLIP = 10.0
 ERROR_CLIP = 5.0
 
+# Trading friction to discourage churn and account for slippage beyond exchange
+# fees. Applied per executed trade as a percentage of the notional size.
+TURNOVER_PENALTY = 0.001
+
 # Dashboard refresh rate in seconds
 DASHBOARD_REFRESH = 1.0
