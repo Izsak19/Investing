@@ -5,11 +5,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Tuple
 
-import numpy as np
 import pandas as pd
 
 from src.agent import BanditAgent
 from src import config
+from src.indicators import INDICATOR_COLUMNS
 
 
 @dataclass
@@ -32,7 +32,8 @@ class Trainer:
 
     def step(self, row: pd.Series, step_idx: int) -> None:
         price = float(row["close"])
-        action = self.agent.act()
+        features = row[INDICATOR_COLUMNS].to_numpy(dtype=float)
+        action = self.agent.act(features)
         reward = 0.0
 
         # Naive execution model. Rewards are always computed on net proceeds
@@ -58,7 +59,7 @@ class Trainer:
         else:
             reward = (price - self.portfolio.entry_price) * self.portfolio.position
 
-        self.agent.update(action, reward)
+        self.agent.update(action, reward, features)
         self.history.append((step_idx, action, price, reward))
         self.total_trades += 1
         if reward > 0:
