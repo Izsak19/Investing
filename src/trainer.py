@@ -42,7 +42,7 @@ class StepResult:
 
 @dataclass
 class TrainerState:
-    version: int = 1
+    version: int = 2
     run_id: str = ""
     steps: int = 0
     prev_price: float | None = None
@@ -60,6 +60,8 @@ class TrainerState:
     portfolio_entry_value: float = 0.0
     total_steps: int = 0
     positive_steps: int = 0
+    last_trade_step: int = -1
+    last_entry_step: int = -1
 
     def to_json(self, path: Path) -> None:
         atomic_write_json(path, asdict(self))
@@ -103,7 +105,10 @@ def build_features(row: pd.Series, portfolio: Portfolio) -> np.ndarray:
     cash_frac = portfolio.cash / max(portfolio_value, 1e-6)
     unrealized_ret = (price / portfolio.entry_price) - 1.0 if portfolio.position > 0 and portfolio.entry_price > 0 else 0.0
 
-    feature_values.extend([pos_flag, cash_frac, unrealized_ret])
+    position_value = portfolio.position * price
+    pos_frac = position_value / max(portfolio_value, 1e-6)
+
+    feature_values.extend([pos_flag, cash_frac, unrealized_ret, 1.0, pos_frac])
 
     features = np.clip(np.asarray(feature_values, dtype=float), -config.FEATURE_CLIP, config.FEATURE_CLIP)
     return features
@@ -132,12 +137,16 @@ class Trainer:
         self.winning_sells = 0
         self._last_price: float | None = None
         self._last_value: float | None = None
+        self.last_trade_step = -1
+        self.last_entry_step = -1
 
     def reset_portfolio(self) -> None:
         self.portfolio.cash = self.initial_cash
         self.portfolio.position = 0.0
         self.portfolio.entry_price = 0.0
         self.portfolio.entry_value = 0.0
+        self.last_trade_step = -1
+        self.last_entry_step = -1
 
     def export_state(self, run_id: str) -> TrainerState:
         return TrainerState(
@@ -158,6 +167,8 @@ class Trainer:
             portfolio_entry_value=self.portfolio.entry_value,
             total_steps=self.total_steps,
             positive_steps=self.positive_steps,
+            last_trade_step=self.last_trade_step,
+            last_entry_step=self.last_entry_step,
         )
 
     def import_state(self, state: TrainerState) -> None:
@@ -175,22 +186,40 @@ class Trainer:
         self.portfolio.entry_value = state.portfolio_entry_value
         self.total_steps = state.total_steps
         self.positive_steps = state.positive_steps
+        self.last_trade_step = state.last_trade_step
+        self.last_entry_step = state.last_entry_step
 
     def _build_features(self, row: pd.Series) -> np.ndarray:
         return build_features(row, self.portfolio)
 
-    def step(self, row: pd.Series, next_row: pd.Series, step_idx: int) -> StepResult:
+    def step(
+        self,
+        row: pd.Series,
+        next_row: pd.Series,
+        step_idx: int,
+        *,
+        train: bool = True,
+        epsilon_override: float | None = None,
+    ) -> StepResult:
         price_now = float(row["close"])
         price_next = float(next_row["close"])
         refilled = self._maybe_refill_portfolio()
         features = self._build_features(row)
         allowed_actions = ["hold"]
-        if self.portfolio.position > 0:
+        gap_respected = self.last_trade_step < 0 or (self.steps - self.last_trade_step) >= config.MIN_TRADE_GAP_STEPS
+        can_sell = (
+            self.portfolio.position > 0
+            and gap_respected
+            and (self.steps - self.last_entry_step) >= config.MIN_HOLD_STEPS
+        )
+        if can_sell:
             allowed_actions.append("sell")
-        if self.portfolio.cash > 0:
+        if self.portfolio.cash > 0 and gap_respected:
             allowed_actions.append("buy")
 
-        action = self.agent.act(features, allowed=allowed_actions, step=self.steps)
+        action = self.agent.act(
+            features, allowed=allowed_actions, step=self.steps, epsilon_override=epsilon_override
+        )
         trade_executed = False
         fee_paid = 0.0
         turnover_penalty = 0.0
@@ -206,16 +235,20 @@ class Trainer:
         # incorporates both the buy and sell fees because the cost basis is
         # fee-adjusted.
         if action == "buy" and cash_before > 0:
-            fee_paid = cash_before * config.FEE_RATE
-            turnover_penalty = (cash_before - fee_paid) * config.TURNOVER_PENALTY
-            investable = cash_before - fee_paid - turnover_penalty
+            trade_cash = cash_before * config.POSITION_FRACTION
+            fee_paid = trade_cash * config.FEE_RATE
+            investable_base = trade_cash - fee_paid
+            turnover_penalty = investable_base * config.TURNOVER_PENALTY
+            investable = investable_base - turnover_penalty
             if investable > 0:
                 trade_executed = True
                 self.portfolio.position = investable / price_now
                 # Track effective cost basis per unit including the buy fee
                 self.portfolio.entry_price = price_now / (1 - config.FEE_RATE)
-                self.portfolio.cash = 0.0
+                self.portfolio.cash = cash_before - trade_cash
                 self.portfolio.entry_value = value_before
+                self.last_trade_step = self.steps
+                self.last_entry_step = self.steps
             else:
                 action = "hold"
                 fee_paid = 0.0
@@ -231,6 +264,8 @@ class Trainer:
             realized_pnl = self.portfolio.cash - self.portfolio.entry_value
             self.portfolio.entry_price = 0.0
             self.portfolio.entry_value = 0.0
+            self.last_trade_step = self.steps
+            self.last_entry_step = -1
 
         value_next = self.portfolio.value(price_next)
         reward = value_next - value_before
@@ -245,15 +280,16 @@ class Trainer:
             next_allowed_actions.append("sell")
         if self.portfolio.cash > 0:
             next_allowed_actions.append("buy")
-        self.agent.update(
-            action,
-            scaled_reward,
-            features,
-            actual_reward=reward,
-            trade_executed=trade_executed,
-            next_features=next_features,
-            allowed_next=next_allowed_actions,
-        )
+        if train:
+            self.agent.update(
+                action,
+                scaled_reward,
+                features,
+                actual_reward=reward,
+                trade_executed=trade_executed,
+                next_features=next_features,
+                allowed_next=next_allowed_actions,
+            )
         self.history.append((step_idx, action, price_now, reward))
         self.total_steps += 1
         if reward > 0:

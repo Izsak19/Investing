@@ -42,5 +42,10 @@ ERROR_CLIP = 5.0
 # fees. Applied per executed trade as a percentage of the notional size.
 TURNOVER_PENALTY = 0.001
 
+# Anti-churn safeguards
+MIN_HOLD_STEPS = 3
+MIN_TRADE_GAP_STEPS = 2
+POSITION_FRACTION = 0.5
+
 # Dashboard refresh rate in seconds
 DASHBOARD_REFRESH = 1.0

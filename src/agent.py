@@ -14,7 +14,7 @@ from src.persistence import atomic_write_json
 
 
 ACTIONS = ["sell", "hold", "buy"]
-FEATURE_COLUMNS = INDICATOR_COLUMNS + ["pos_flag", "cash_frac", "unrealized_ret"]
+FEATURE_COLUMNS = INDICATOR_COLUMNS + ["pos_flag", "cash_frac", "unrealized_ret", "bias", "pos_frac"]
 
 
 @dataclass
@@ -79,8 +79,23 @@ class AgentState:
 class BanditAgent:
     """Epsilon-greedy multi-armed bandit with additive reward updates."""
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        epsilon_start: float | None = None,
+        epsilon_end: float | None = None,
+        epsilon_decay_steps: int | None = None,
+        epsilon_when_flat: float | None = None,
+    ):
         self.state = AgentState.from_json(Path(config.STATE_PATH))
+        self.epsilon_start = epsilon_start if epsilon_start is not None else config.EPSILON_START
+        self.epsilon_end = epsilon_end if epsilon_end is not None else config.EPSILON_END
+        self.epsilon_decay_steps = (
+            epsilon_decay_steps if epsilon_decay_steps is not None else config.EPSILON_DECAY_STEPS
+        )
+        self.epsilon_when_flat = (
+            epsilon_when_flat if epsilon_when_flat is not None else config.EPSILON_WHEN_FLAT
+        )
         self._prepare_state()
 
     @staticmethod
@@ -151,10 +166,10 @@ class BanditAgent:
 
     def current_epsilon(self, step: int | None = None) -> float:
         t = step if step is not None else self.state.steps_seen
-        progress = min(1.0, t / config.EPSILON_DECAY_STEPS)
+        progress = min(1.0, t / self.epsilon_decay_steps)
         epsilon = max(
-            config.EPSILON_END,
-            config.EPSILON_START + (config.EPSILON_END - config.EPSILON_START) * progress,
+            self.epsilon_end,
+            self.epsilon_start + (self.epsilon_end - self.epsilon_start) * progress,
         )
         return float(epsilon)
 
@@ -173,8 +188,13 @@ class BanditAgent:
 
         epsilon = epsilon_override if epsilon_override is not None else self.current_epsilon(step)
         is_flat = "buy" in actions and "sell" not in actions
-        if epsilon_override is None and is_flat and self.state.steps_seen < config.FLAT_EXPLORATION_WARMUP_STEPS:
-            epsilon = max(epsilon, config.EPSILON_WHEN_FLAT)
+        if (
+            epsilon_override is None
+            and is_flat
+            and self.state.steps_seen < config.FLAT_EXPLORATION_WARMUP_STEPS
+            and self.epsilon_when_flat > 0
+        ):
+            epsilon = max(epsilon, self.epsilon_when_flat)
         self.state.last_epsilon = epsilon
 
         if np.random.random() < epsilon:
