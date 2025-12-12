@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import math
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -18,7 +18,7 @@ from src.webapp import WebDashboard
 
 
 def generate_run_id(symbol: str, timeframe: str) -> str:
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     safe_symbol = symbol.replace("/", "_")
     safe_timeframe = timeframe.replace("/", "_")
     return f"{safe_symbol}_{safe_timeframe}_{timestamp}"
