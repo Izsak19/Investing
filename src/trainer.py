@@ -23,15 +23,23 @@ class Portfolio:
 
 
 class Trainer:
-    def __init__(self, agent: BanditAgent, initial_cash: float = 1000.0):
+    def __init__(
+        self,
+        agent: BanditAgent,
+        initial_cash: float = config.INITIAL_CASH,
+        min_cash: float = config.MIN_TRAINING_CASH,
+    ):
         self.agent = agent
         self.portfolio = Portfolio(cash=initial_cash)
         self.history: List[Tuple[int, str, float, float]] = []  # step, action, price, reward
         self.total_trades: int = 0
         self.successful_trades: int = 0
+        self.initial_cash = initial_cash
+        self.min_cash = min_cash
 
     def step(self, row: pd.Series, step_idx: int) -> None:
         price = float(row["close"])
+        self._maybe_refill_portfolio()
         features = row[INDICATOR_COLUMNS].to_numpy(dtype=float)
         action = self.agent.act(features)
         reward = 0.0
@@ -64,6 +72,24 @@ class Trainer:
         self.total_trades += 1
         if reward > 0:
             self.successful_trades += 1
+
+    def _maybe_refill_portfolio(self) -> None:
+        """
+        Reset the paper trading balance after the agent burns through its cash.
+
+        Early in training the policy can be poor and quickly deplete the
+        portfolio. When the agent is out of cash and has no open position it
+        cannot take further actions that produce rewards, which stalls
+        learning. Replenishing the paper account keeps exploration going while
+        still letting the agent experience the consequences of bad trades.
+        """
+
+        if self.portfolio.position > 0:
+            return
+
+        if self.portfolio.cash < self.min_cash:
+            self.portfolio.cash = self.initial_cash
+            self.portfolio.entry_price = 0.0
 
     @property
     def success_rate(self) -> float:
