@@ -53,6 +53,8 @@ def _parabolic_sar(high: pd.Series, low: pd.Series, step: float = 0.02, max_step
     ep = low.iloc[0]
     sar.iloc[0] = low.iloc[0]
 
+    # Note: this looped implementation is simple but slow on very large datasets.
+    # Consider vectorization or numba for millions of rows.
     for i in range(1, len(high)):
         prev_sar = sar.iloc[i - 1]
         if up_trend:
@@ -87,6 +89,7 @@ def _supertrend(df: pd.DataFrame, length: int, multiplier: float) -> pd.Series:
     supertrend = pd.Series(index=df.index, dtype=float)
     direction = True  # True for uptrend, False for downtrend
 
+    # Pure-Python loop; optimize with vectorization/numba if scaling to very large windows.
     for i in range(len(df)):
         if i == 0:
             supertrend.iloc[i] = upperband.iloc[i]

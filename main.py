@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
+import random
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +15,7 @@ from src import config
 from src.agent import BanditAgent
 from src.data_feed import DataFeed, MarketConfig
 from src.dashboard import live_dashboard
+from src.timeframe import timeframe_to_minutes
 from src.trainer import StepResult, Trainer, resume_from
 from src.webapp import WebDashboard
 
@@ -210,20 +213,13 @@ def stream_live(
                 time.sleep(delay)
 
 
-def timeframe_to_minutes(timeframe: str) -> float:
-    """Convert timeframe strings like "1m", "5m", or "1h" to minutes."""
+def _initialize_offline_seeds(seed: int, run_dir: Path) -> None:
+    import numpy as np
 
-    if not timeframe:
-        return 1.0
-
-    unit = timeframe[-1].lower()
-    try:
-        quantity = float(timeframe[:-1])
-    except ValueError:
-        return 1.0
-
-    multiplier = {"m": 1, "h": 60, "d": 24 * 60}.get(unit)
-    return quantity * multiplier if multiplier else 1.0
+    random.seed(seed)
+    np.random.seed(seed)
+    seeds_path = run_dir / "seeds.json"
+    seeds_path.write_text(json.dumps({"seed": seed, "mode": "offline"}, indent=2))
 
 
 def main() -> None:
@@ -258,6 +254,9 @@ def main() -> None:
         run_dir = run_dir or base_run_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    if args.offline:
+        _initialize_offline_seeds(config.DEFAULT_RANDOM_SEED, run_dir)
+
     feed = DataFeed(
         MarketConfig(
             symbol=args.symbol,
@@ -279,7 +278,7 @@ def main() -> None:
     agent.state.run_id = agent.state.run_id or run_id
     agent.state.symbol = agent.state.symbol or args.symbol
     agent.state.timeframe = agent.state.timeframe or args.timeframe
-    trainer = Trainer(agent)
+    trainer = Trainer(agent, timeframe=args.timeframe)
     if args.resume:
         resume_from(run_dir, agent, trainer)
     web_dashboard = WebDashboard(port=args.web_port) if args.web_dashboard else None

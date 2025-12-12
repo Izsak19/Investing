@@ -17,6 +17,7 @@ from src import config
 from src.indicators import INDICATOR_COLUMNS
 from src.metrics import compute_max_drawdown, compute_sharpe_ratio, rolling_volatility, total_return
 from src.persistence import atomic_write_json
+from src.timeframe import periods_per_year
 
 
 @dataclass
@@ -122,6 +123,7 @@ class Trainer:
         agent: BanditAgent,
         initial_cash: float = config.INITIAL_CASH,
         min_cash: float = config.MIN_TRAINING_CASH,
+        timeframe: str | None = None,
     ):
         self.agent = agent
         self.portfolio = Portfolio(cash=initial_cash)
@@ -146,6 +148,8 @@ class Trainer:
         self._return_history: deque[float] = deque(maxlen=config.RISK_VOL_WINDOW)
         self._recent_actions: deque[str] = deque(maxlen=config.ACTION_HISTORY_WINDOW)
         self._action_counter: Counter[str] = Counter()
+        self.timeframe = timeframe or agent.state.timeframe or config.DEFAULT_TIMEFRAME
+        self.periods_per_year = periods_per_year(self.timeframe)
 
     def reset_portfolio(self) -> None:
         self.portfolio.cash = self.initial_cash
@@ -210,6 +214,25 @@ class Trainer:
         self._recent_actions.append(action)
         self._action_counter[action] += 1
 
+    def _walk_forward_returns(self, folds: int) -> list[float]:
+        if folds <= 1 or len(self._equity_curve) < folds + 1:
+            return []
+        fold_size = len(self._equity_curve) // folds
+        if fold_size <= 0:
+            return []
+
+        fold_returns: list[float] = []
+        start_idx = 0
+        for fold_idx in range(folds):
+            end_idx = (fold_idx + 1) * fold_size if fold_idx < folds - 1 else len(self._equity_curve)
+            if end_idx - start_idx < 2:
+                continue
+            start_value = self._equity_curve[start_idx]
+            end_value = self._equity_curve[end_idx - 1]
+            fold_returns.append(total_return(start_value, end_value))
+            start_idx = end_idx
+        return fold_returns
+
     def step(
         self,
         row: pd.Series,
@@ -258,17 +281,18 @@ class Trainer:
             investable_base = trade_cash - fee_paid
             turnover_penalty = investable_base * config.TURNOVER_PENALTY
             investable = investable_base - turnover_penalty
-            if investable > 0:
+            gross_outlay = trade_cash + turnover_penalty
+            if investable > 0 and gross_outlay <= cash_before:
                 trade_executed = True
                 trade_size = investable / price_now
                 prior_position = self.portfolio.position
                 prior_cost_basis = prior_position * self.portfolio.entry_price
                 new_position = prior_position + trade_size
-                total_cost_basis = prior_cost_basis + trade_cash
+                total_cost_basis = prior_cost_basis + gross_outlay
                 # Track effective cost basis per unit including fees/penalties
                 self.portfolio.entry_price = total_cost_basis / max(new_position, 1e-9)
                 self.portfolio.position = new_position
-                self.portfolio.cash = cash_before - trade_cash
+                self.portfolio.cash = cash_before - gross_outlay
                 if prior_position == 0:
                     self.portfolio.entry_value = value_before
                 self.last_trade_step = self.steps
@@ -391,7 +415,7 @@ class Trainer:
 
     @property
     def sharpe_ratio(self) -> float:
-        return compute_sharpe_ratio(list(self._return_history))
+        return compute_sharpe_ratio(list(self._return_history), periods_per_year=self.periods_per_year)
 
     @property
     def max_drawdown(self) -> float:
@@ -495,8 +519,11 @@ class Trainer:
         portfolio_value = self.portfolio.value(price)
         total_ret = total_return(self.initial_cash, portfolio_value)
         realized_max_drawdown = max_drawdown if max_drawdown is not None else compute_max_drawdown(self._equity_curve)
-        sharpe = compute_sharpe_ratio(list(self._return_history))
+        sharpe = compute_sharpe_ratio(list(self._return_history), periods_per_year=self.periods_per_year)
         distribution = self.action_distribution
+        walkforward_returns = self._walk_forward_returns(config.WALKFORWARD_FOLDS)
+        walkforward_mean = float(np.mean(walkforward_returns)) if walkforward_returns else 0.0
+        walkforward_min = float(np.min(walkforward_returns)) if walkforward_returns else 0.0
         with path.open("a", newline="") as f:
             writer = csv.writer(f)
             if write_header:
@@ -517,11 +544,16 @@ class Trainer:
                         "data_is_live",
                         "baseline_final_value",
                         "val_final_value",
+                        "timeframe",
+                        "periods_per_year",
                         "max_drawdown",
                         "executed_trades",
                         "ma_baseline_final_value",
                         "total_return",
                         "sharpe_ratio",
+                        "walkforward_folds",
+                        "walkforward_min_return",
+                        "walkforward_mean_return",
                         "action_hold",
                         "action_buy",
                         "action_sell",
@@ -544,11 +576,16 @@ class Trainer:
                     data_is_live if data_is_live is not None else self.last_data_is_live,
                     baseline_final_value,
                     val_final_value,
+                    self.timeframe,
+                    self.periods_per_year,
                     realized_max_drawdown,
                     executed_trades,
                     ma_baseline_final_value,
                     total_ret,
                     sharpe,
+                    config.WALKFORWARD_FOLDS,
+                    walkforward_min,
+                    walkforward_mean,
                     distribution.get("hold", 0.0),
                     distribution.get("buy", 0.0),
                     distribution.get("sell", 0.0),

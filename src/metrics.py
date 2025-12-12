@@ -18,7 +18,7 @@ def compute_max_drawdown(equity_curve: Sequence[float]) -> float:
     return max_dd
 
 
-def compute_sharpe_ratio(returns: Sequence[float]) -> float:
+def compute_sharpe_ratio(returns: Sequence[float], *, periods_per_year: float | None = None) -> float:
     if not returns:
         return 0.0
     arr = np.asarray(returns, dtype=float)
@@ -26,8 +26,8 @@ def compute_sharpe_ratio(returns: Sequence[float]) -> float:
     std = float(np.std(arr))
     if std <= 0:
         return 0.0
-    # Scale by sqrt(N) to normalize for sample count; risk-free rate assumed 0.
-    return (mean / std) * math.sqrt(len(arr))
+    scale = math.sqrt(periods_per_year) if periods_per_year and periods_per_year > 0 else 1.0
+    return (mean / std) * scale
 
 
 def total_return(initial_value: float, final_value: float) -> float:
