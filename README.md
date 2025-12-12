@@ -78,6 +78,17 @@ python main.py --offline --web-dashboard --dashboard --duration 120
 - Streams OHLC candles, actions, and portfolio metrics to the browser while still rendering the terminal dashboard.
 - The console prints a friendly link (`Dashboard available at http://localhost:8000`) even when the server binds to `0.0.0.0`.
 
+## Automated 24h retraining loop
+Run a full “fetch → feature → train → validate → backtest” cycle on the last 24h of candles until a target success rate is reached:
+
+```bash
+python auto_retrain.py --offline --min-success-rate 60 --max-cycles 3
+```
+
+- Uses live exchange candles by default; add `--offline` for synthetic data.
+- Splits the window into train/validation slices (default 80/20) and restores the prior agent state when the validation success rate misses the threshold.
+- Adjust `--timeframe` or `--train-steps` if you want fewer than 1440 steps for a 1m window.
+
 ## Safety & next steps
 - This code is for experimentation only—do **not** use it for real-money trading without substantial risk controls.
 - For production use, add proper exchange credentials management, slippage/fee modeling, and unit tests for indicator correctness.
