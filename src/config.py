@@ -5,6 +5,10 @@ DEFAULT_TIMEFRAME = "1m"
 DEFAULT_LIMIT = 200
 STATE_PATH = "data/state.json"
 TRADE_LOG_PATH = "data/trades.csv"
+RUNS_DIR = "data/runs"
+DEFAULT_CHECKPOINT_EVERY = 2000
+DEFAULT_FLUSH_TRADES_EVERY = 500
+DEFAULT_KEEP_LAST_CHECKPOINTS = 5
 FEE_RATE = 0.001  # 0.1% per transaction on Binance spot
 INITIAL_CASH = 1000.0
 # Minimum idle cash before we automatically refill the portfolio so the learner
