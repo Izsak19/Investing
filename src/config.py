@@ -12,16 +12,18 @@ INITIAL_CASH = 1000.0
 MIN_TRAINING_CASH = 50.0
 
 # Hyperparameters for the simple bandit learner
-ALPHA = 0.2  # learning rate
+ALPHA = 0.1  # learning rate
 GAMMA = 0.0  # no discounting for one-step reward
 EPSILON = 0.1  # exploration probability
 
 # Numerical stability safeguards
 # Caps for feature values and weights to prevent floating-point overflow when
-# running long training sessions with large price-denominated indicators.
-FEATURE_CLIP = 1e6
-WEIGHT_CLIP = 1e6
-ERROR_CLIP = 1e6
+# running long training sessions. Normalizing indicators by price (see
+# Trainer.step) already keeps most inputs near 1, so these limits simply act as
+# a backstop against outliers or unexpected data.
+FEATURE_CLIP = 10.0
+WEIGHT_CLIP = 10.0
+ERROR_CLIP = 5.0
 
 # Dashboard refresh rate in seconds
 DASHBOARD_REFRESH = 1.0

@@ -89,7 +89,14 @@ class BanditAgent:
             choice = ACTIONS[int(np.argmax(estimates))]
         return choice
 
-    def update(self, action: str, reward: float, features: np.ndarray) -> None:
+    def update(
+        self,
+        action: str,
+        reward: float,
+        features: np.ndarray,
+        *,
+        actual_reward: float | None = None,
+    ) -> None:
         safe_features = self._sanitize(features)
         idx = ACTIONS.index(action)
         prediction = float(np.dot(self.state.weights[idx], safe_features))
@@ -98,7 +105,7 @@ class BanditAgent:
         bounded = np.clip(updated, -config.WEIGHT_CLIP, config.WEIGHT_CLIP)
         self.state.weights[idx] = list(bounded)
         self.state.q_values = list(self._estimate_rewards(safe_features))
-        self.state.total_reward += reward
+        self.state.total_reward += reward if actual_reward is None else actual_reward
         self.state.trades += 1
 
     def save(self) -> None:
