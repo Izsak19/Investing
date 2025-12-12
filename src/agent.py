@@ -21,11 +21,13 @@ FEATURE_COLUMNS = INDICATOR_COLUMNS + ["pos_flag", "cash_frac", "unrealized_ret"
 class AgentState:
     q_values: List[float]
     weights: List[List[float]]
+    cov_inv_matrices: List[List[List[float]]]
+    bias_vectors: List[List[float]]
     total_reward: float = 0.0
     trades: int = 0
     steps_seen: int = 0
     last_epsilon: float = 0.0
-    version: int = 2
+    version: int = 3
     run_id: str = ""
     symbol: str = ""
     timeframe: str = ""
@@ -33,6 +35,8 @@ class AgentState:
     alpha: float = config.ALPHA
     feature_clip: float = config.FEATURE_CLIP
     weight_clip: float = config.WEIGHT_CLIP
+    ridge_factor: float = config.RIDGE_FACTOR
+    ucb_scale: float = config.UCB_SCALE
     indicator_columns: list[str] = field(default_factory=lambda: FEATURE_COLUMNS[:])
 
     @classmethod
@@ -40,6 +44,11 @@ class AgentState:
         return cls(
             q_values=[0.0, 0.0, 0.0],
             weights=[[0.0 for _ in FEATURE_COLUMNS] for _ in ACTIONS],
+            cov_inv_matrices=[
+                (np.eye(len(FEATURE_COLUMNS), dtype=float) / config.RIDGE_FACTOR).tolist()
+                for _ in ACTIONS
+            ],
+            bias_vectors=[[0.0 for _ in FEATURE_COLUMNS] for _ in ACTIONS],
             last_epsilon=config.EPSILON_START,
             indicator_columns=FEATURE_COLUMNS[:],
         )
@@ -54,6 +63,14 @@ class AgentState:
         data = json.loads(path.read_text())
         if "weights" not in data:
             data["weights"] = [[0.0 for _ in FEATURE_COLUMNS] for _ in ACTIONS]
+        data.setdefault(
+            "cov_inv_matrices",
+            [
+                (np.eye(len(FEATURE_COLUMNS), dtype=float) / config.RIDGE_FACTOR).tolist()
+                for _ in ACTIONS
+            ],
+        )
+        data.setdefault("bias_vectors", [[0.0 for _ in FEATURE_COLUMNS] for _ in ACTIONS])
         if "q_values" not in data:
             data["q_values"] = [0.0, 0.0, 0.0]
         if "steps_seen" not in data:
@@ -72,12 +89,14 @@ class AgentState:
         data.setdefault("alpha", config.ALPHA)
         data.setdefault("feature_clip", config.FEATURE_CLIP)
         data.setdefault("weight_clip", config.WEIGHT_CLIP)
+        data.setdefault("ridge_factor", config.RIDGE_FACTOR)
+        data.setdefault("ucb_scale", config.UCB_SCALE)
         data.setdefault("indicator_columns", FEATURE_COLUMNS[:])
         return cls(**data)
 
 
 class BanditAgent:
-    """Epsilon-greedy multi-armed bandit with additive reward updates."""
+    """Contextual bandit with LinUCB-style uncertainty-aware exploration."""
 
     def __init__(
         self,
@@ -114,45 +133,95 @@ class BanditAgent:
         )
         return clipped
 
-    def _ensure_weight_shape(self) -> None:
-        if len(self.state.weights) != len(ACTIONS):
-            self.state.weights = [[0.0 for _ in range(self._feature_size)] for _ in ACTIONS]
-            return
-
-        for i in range(len(self.state.weights)):
-            if len(self.state.weights[i]) != self._feature_size:
-                self.state.weights[i] = [0.0 for _ in range(self._feature_size)]
-
     def _clip_weights(self, weights: list[list[float]]) -> list[list[float]]:
         bounded = np.clip(np.asarray(weights, dtype=float), -config.WEIGHT_CLIP, config.WEIGHT_CLIP)
         return bounded.tolist()
 
+    def _ensure_covariance_shape(self) -> None:
+        identity_scale = self.state.ridge_factor if self.state.ridge_factor > 0 else 1.0
+        base = np.eye(self._feature_size, dtype=float) / identity_scale
+        if len(self.state.cov_inv_matrices) != len(ACTIONS):
+            self.state.cov_inv_matrices = [base.tolist() for _ in ACTIONS]
+            return
+
+        for i in range(len(self.state.cov_inv_matrices)):
+            mat = np.asarray(self.state.cov_inv_matrices[i], dtype=float)
+            if mat.shape != (self._feature_size, self._feature_size):
+                self.state.cov_inv_matrices[i] = base.tolist()
+
+    def _ensure_bias_shape(self) -> None:
+        if len(self.state.bias_vectors) != len(ACTIONS):
+            self.state.bias_vectors = [[0.0 for _ in range(self._feature_size)] for _ in ACTIONS]
+            return
+
+        for i in range(len(self.state.bias_vectors)):
+            if len(self.state.bias_vectors[i]) != self._feature_size:
+                self.state.bias_vectors[i] = [0.0 for _ in range(self._feature_size)]
+
+    def _recompute_weights(self, action_idx: int | None = None) -> None:
+        indices = range(len(ACTIONS)) if action_idx is None else [action_idx]
+        for idx in indices:
+            cov_inv = np.asarray(self.state.cov_inv_matrices[idx], dtype=float)
+            bias = np.asarray(self.state.bias_vectors[idx], dtype=float)
+            weights = cov_inv @ bias
+            bounded = np.clip(weights, -config.WEIGHT_CLIP, config.WEIGHT_CLIP)
+            self.state.weights[idx] = bounded.tolist()
+
     def _migrate_weights(self) -> None:
-        """Align persisted weights with the current feature set."""
+        """Align persisted state with the current feature set."""
 
         new_columns = FEATURE_COLUMNS
-        new_weights = np.zeros((len(ACTIONS), len(new_columns)), dtype=float)
+        new_size = len(new_columns)
         current_columns = list(self.state.indicator_columns or [])
-        base_cols = len(current_columns) if current_columns else len(new_columns)
-        source = np.asarray(self.state.weights, dtype=float)
-        if source.ndim != 2 or source.shape[0] != len(ACTIONS) or source.shape[1] == 0:
-            source = np.zeros((len(ACTIONS), base_cols), dtype=float)
         column_map = {name: idx for idx, name in enumerate(current_columns)}
-        for new_idx, name in enumerate(new_columns):
-            old_idx = column_map.get(name)
-            if old_idx is None:
-                continue
-            if old_idx >= source.shape[1]:
-                continue
-            new_weights[:, new_idx] = source[:, old_idx]
-        clipped = np.clip(new_weights, -config.WEIGHT_CLIP, config.WEIGHT_CLIP)
-        self.state.weights = clipped.tolist()
+
+        mapped_bias = np.zeros((len(ACTIONS), new_size), dtype=float)
+        mapped_weights = np.zeros((len(ACTIONS), new_size), dtype=float)
+        for action_idx in range(len(ACTIONS)):
+            bias_source = (
+                np.asarray(self.state.bias_vectors[action_idx], dtype=float)
+                if action_idx < len(self.state.bias_vectors)
+                else np.zeros(len(current_columns), dtype=float)
+            )
+            weight_source = (
+                np.asarray(self.state.weights[action_idx], dtype=float)
+                if action_idx < len(self.state.weights)
+                else np.zeros(len(current_columns), dtype=float)
+            )
+            for new_idx, name in enumerate(new_columns):
+                old_idx = column_map.get(name)
+                if old_idx is None:
+                    continue
+                if old_idx < bias_source.shape[0]:
+                    mapped_bias[action_idx, new_idx] = bias_source[old_idx]
+                elif old_idx < weight_source.shape[0]:
+                    mapped_bias[action_idx, new_idx] = weight_source[old_idx]
+                if old_idx < weight_source.shape[0]:
+                    mapped_weights[action_idx, new_idx] = weight_source[old_idx]
+
+        identity_scale = self.state.ridge_factor if self.state.ridge_factor > 0 else 1.0
+        base_cov_inv = np.eye(new_size, dtype=float) / identity_scale
+        self.state.cov_inv_matrices = [base_cov_inv.tolist() for _ in ACTIONS]
+        self.state.bias_vectors = mapped_bias.tolist()
+        self.state.weights = self._clip_weights(mapped_weights.tolist())
         self.state.indicator_columns = new_columns[:]
-        self._feature_size = len(new_columns)
+        self._feature_size = new_size
+        self._recompute_weights()
 
     def _estimate_rewards(self, features: np.ndarray) -> np.ndarray:
         safe_features = self._sanitize(features)
         return np.dot(np.asarray(self.state.weights), safe_features)
+
+    def _ucb_scores(self, features: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        safe_features = self._sanitize(features)
+        means = np.dot(np.asarray(self.state.weights), safe_features)
+        bonus_terms: list[float] = []
+        for idx in range(len(ACTIONS)):
+            cov_inv = np.asarray(self.state.cov_inv_matrices[idx], dtype=float)
+            variance = float(np.dot(safe_features, cov_inv @ safe_features))
+            bonus = float(self.state.ucb_scale * np.sqrt(max(variance, 0.0)))
+            bonus_terms.append(bonus)
+        return means + np.asarray(bonus_terms), means
 
     def _prepare_state(self) -> None:
         self._feature_size = len(self.state.indicator_columns) or len(FEATURE_COLUMNS)
@@ -160,9 +229,13 @@ class BanditAgent:
             self.state.indicator_columns = FEATURE_COLUMNS[:]
         if self.state.indicator_columns != FEATURE_COLUMNS:
             self._migrate_weights()
-        self._feature_size = len(self.state.indicator_columns) or len(FEATURE_COLUMNS)
-        self.state.weights = self._clip_weights(self.state.weights)
-        self._ensure_weight_shape()
+        else:
+            self._feature_size = len(self.state.indicator_columns) or len(FEATURE_COLUMNS)
+        self._ensure_covariance_shape()
+        self._ensure_bias_shape()
+        if len(self.state.weights) != len(ACTIONS):
+            self.state.weights = [[0.0 for _ in range(self._feature_size)] for _ in ACTIONS]
+        self._recompute_weights()
 
     def current_epsilon(self, step: int | None = None) -> float:
         t = step if step is not None else self.state.steps_seen
@@ -181,8 +254,8 @@ class BanditAgent:
         step: int | None = None,
         epsilon_override: float | None = None,
     ) -> str:
-        estimates = self._estimate_rewards(features)
-        self.state.q_values = list(estimates)
+        ucb_scores, means = self._ucb_scores(features)
+        self.state.q_values = list(means)
 
         actions = allowed if allowed is not None else ACTIONS
 
@@ -200,9 +273,9 @@ class BanditAgent:
         if np.random.random() < epsilon:
             return str(np.random.choice(actions))
 
-        allowed_estimates = {action: estimates[ACTIONS.index(action)] for action in actions}
-        best_estimate = max(allowed_estimates.values())
-        candidates = [action for action, value in allowed_estimates.items() if value == best_estimate]
+        allowed_scores = {action: ucb_scores[ACTIONS.index(action)] for action in actions}
+        best_score = max(allowed_scores.values())
+        candidates = [action for action, value in allowed_scores.items() if value == best_score]
         return str(np.random.choice(candidates))
 
     def update(
@@ -218,18 +291,16 @@ class BanditAgent:
     ) -> None:
         safe_features = self._sanitize(features)
         idx = ACTIONS.index(action)
-        prediction = float(np.dot(self.state.weights[idx], safe_features))
-        target = reward
-        if config.USE_TD and next_features is not None:
-            safe_next = self._sanitize(next_features)
-            next_actions = allowed_next if allowed_next is not None else ACTIONS
-            next_idxs = [ACTIONS.index(a) for a in next_actions]
-            q_next = float(np.max(np.dot(np.asarray(self.state.weights)[next_idxs], safe_next)))
-            target = reward + config.GAMMA * q_next
-        error = float(np.clip(target - prediction, -config.ERROR_CLIP, config.ERROR_CLIP))
-        updated = np.asarray(self.state.weights[idx]) + config.ALPHA * error * safe_features
-        bounded = np.clip(updated, -config.WEIGHT_CLIP, config.WEIGHT_CLIP)
-        self.state.weights[idx] = list(bounded)
+        cov_inv = np.asarray(self.state.cov_inv_matrices[idx], dtype=float)
+        feature_vec = safe_features.reshape(-1, 1)
+        denom = float(1.0 + (feature_vec.T @ cov_inv @ feature_vec))
+        adjustment = (cov_inv @ feature_vec @ feature_vec.T @ cov_inv) / denom
+        updated_cov_inv = cov_inv - adjustment
+        updated_bias = np.asarray(self.state.bias_vectors[idx], dtype=float) + reward * safe_features
+
+        self.state.cov_inv_matrices[idx] = updated_cov_inv.tolist()
+        self.state.bias_vectors[idx] = updated_bias.tolist()
+        self._recompute_weights(idx)
         self.state.q_values = list(self._estimate_rewards(safe_features))
         self.state.total_reward += reward if actual_reward is None else actual_reward
         if trade_executed:
