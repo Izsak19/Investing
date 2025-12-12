@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
+from datetime import datetime
 from pathlib import Path
 from typing import List
 
@@ -9,6 +10,7 @@ import numpy as np
 
 from src import config
 from src.indicators import INDICATOR_COLUMNS
+from src.persistence import atomic_write_json
 
 
 ACTIONS = ["sell", "hold", "buy"]
@@ -22,6 +24,15 @@ class AgentState:
     trades: int = 0
     steps_seen: int = 0
     last_epsilon: float = 0.0
+    version: int = 2
+    run_id: str = ""
+    symbol: str = ""
+    timeframe: str = ""
+    saved_at_utc: str = ""
+    alpha: float = config.ALPHA
+    feature_clip: float = config.FEATURE_CLIP
+    weight_clip: float = config.WEIGHT_CLIP
+    indicator_columns: list[str] = field(default_factory=lambda: INDICATOR_COLUMNS[:])
 
     @classmethod
     def default(cls) -> "AgentState":
@@ -29,11 +40,11 @@ class AgentState:
             q_values=[0.0, 0.0, 0.0],
             weights=[[0.0 for _ in INDICATOR_COLUMNS] for _ in ACTIONS],
             last_epsilon=config.EPSILON_START,
+            indicator_columns=INDICATOR_COLUMNS[:],
         )
 
     def to_json(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(asdict(self), indent=2))
+        atomic_write_json(path, asdict(self))
 
     @classmethod
     def from_json(cls, path: Path) -> "AgentState":
@@ -42,10 +53,25 @@ class AgentState:
         data = json.loads(path.read_text())
         if "weights" not in data:
             data["weights"] = [[0.0 for _ in INDICATOR_COLUMNS] for _ in ACTIONS]
+        if "q_values" not in data:
+            data["q_values"] = [0.0, 0.0, 0.0]
         if "steps_seen" not in data:
             data["steps_seen"] = 0
         if "last_epsilon" not in data:
             data["last_epsilon"] = config.EPSILON_START
+        if "trades" not in data:
+            data["trades"] = 0
+        if "total_reward" not in data:
+            data["total_reward"] = 0.0
+        data.setdefault("version", 2)
+        data.setdefault("run_id", "")
+        data.setdefault("symbol", "")
+        data.setdefault("timeframe", "")
+        data.setdefault("saved_at_utc", "")
+        data.setdefault("alpha", config.ALPHA)
+        data.setdefault("feature_clip", config.FEATURE_CLIP)
+        data.setdefault("weight_clip", config.WEIGHT_CLIP)
+        data.setdefault("indicator_columns", INDICATOR_COLUMNS[:])
         return cls(**data)
 
 
@@ -54,7 +80,10 @@ class BanditAgent:
 
     def __init__(self):
         self.state = AgentState.from_json(Path(config.STATE_PATH))
-        self._feature_size = len(INDICATOR_COLUMNS)
+        self._feature_size = len(self.state.indicator_columns) or len(INDICATOR_COLUMNS)
+        if self._feature_size != len(INDICATOR_COLUMNS):
+            self.state.indicator_columns = INDICATOR_COLUMNS[:]
+            self._feature_size = len(INDICATOR_COLUMNS)
         self._ensure_weight_shape()
 
     @staticmethod
@@ -149,5 +178,44 @@ class BanditAgent:
             self.state.trades += 1
         self.state.steps_seen += 1
 
-    def save(self) -> None:
-        self.state.to_json(Path(config.STATE_PATH))
+    def _prune_checkpoints(self, directory: Path, keep_last: int) -> None:
+        checkpoints: list[Path] = []
+        for candidate in directory.glob("agent_state_step_*.json"):
+            try:
+                int(candidate.stem.split("_")[-1])
+            except (ValueError, IndexError):
+                continue
+            checkpoints.append(candidate)
+        checkpoints.sort(key=lambda p: int(p.stem.split("_")[-1]))
+        if keep_last <= 0:
+            keep_last = 0
+        for old in checkpoints[:-keep_last]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+
+    def save(
+        self,
+        *,
+        run_dir: Path | None = None,
+        checkpoint: bool = False,
+        keep_last: int = config.DEFAULT_KEEP_LAST_CHECKPOINTS,
+    ) -> Path:
+        target_dir = run_dir or Path(config.STATE_PATH).parent
+        target_dir.mkdir(parents=True, exist_ok=True)
+        self.state.saved_at_utc = datetime.utcnow().isoformat()
+
+        latest_path = target_dir / "agent_state_latest.json"
+        self.state.to_json(latest_path)
+        pointer_path = Path(config.STATE_PATH)
+        pointer_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(pointer_path, asdict(self.state))
+
+        saved_path = latest_path
+        if checkpoint:
+            checkpoint_path = target_dir / f"agent_state_step_{self.state.steps_seen}.json"
+            self.state.to_json(checkpoint_path)
+            saved_path = checkpoint_path
+            self._prune_checkpoints(target_dir, keep_last)
+        return saved_path

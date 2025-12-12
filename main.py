@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import math
 import time
+from datetime import datetime
+from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
@@ -12,8 +14,15 @@ from src.agent import BanditAgent
 from src.data_feed import DataFeed, MarketConfig
 from src.indicators import compute_indicators
 from src.dashboard import live_dashboard
-from src.trainer import StepResult, Trainer
+from src.trainer import StepResult, Trainer, resume_from
 from src.webapp import WebDashboard
+
+
+def generate_run_id(symbol: str, timeframe: str) -> str:
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    safe_symbol = symbol.replace("/", "_")
+    safe_timeframe = timeframe.replace("/", "_")
+    return f"{safe_symbol}_{safe_timeframe}_{timestamp}"
 
 
 def parse_args() -> argparse.Namespace:
@@ -39,11 +48,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--web-dashboard", action="store_true", help="serve a Plotly HTML dashboard on port 8000")
     parser.add_argument("--web-port", type=int, default=8000, help="port for the web dashboard")
     parser.add_argument("--continuous", action="store_true", help="keep fetching live data until interrupted")
+    parser.add_argument("--run-id", default=None, help="identifier for this training run")
+    parser.add_argument("--run-dir", default=None, help="directory to store run artifacts")
+    parser.add_argument("--resume", action="store_true", help="resume from the latest or specified run directory")
+    parser.add_argument("--checkpoint-every", type=int, default=config.DEFAULT_CHECKPOINT_EVERY)
+    parser.add_argument("--flush-trades-every", type=int, default=config.DEFAULT_FLUSH_TRADES_EVERY)
+    parser.add_argument("--keep-last", type=int, default=config.DEFAULT_KEEP_LAST_CHECKPOINTS)
     return parser.parse_args()
 
 
 def run_loop(
-    trainer: Trainer, frame: pd.DataFrame, steps: int, duration: float | None, delay: float
+    trainer: Trainer,
+    frame: pd.DataFrame,
+    steps: int,
+    duration: float | None,
+    delay: float,
+    *,
+    run_id: str,
+    run_dir: Path,
+    checkpoint_every: int,
+    flush_trades_every: int,
+    keep_last: int,
 ) -> Iterable[tuple[int, pd.Series, StepResult, float, float, float]]:
     """
     Generate trading events either for a fixed number of steps or until a duration elapses.
@@ -77,6 +102,12 @@ def run_loop(
         trade_impact = after_trade_value - before_trade_value
         mtm_delta = after_trade_value - pv_prev_after
         pv_prev_after = after_trade_value
+
+        if flush_trades_every > 0 and trainer.steps % flush_trades_every == 0:
+            trainer._flush_trades_and_metrics(run_dir)
+        if checkpoint_every > 0 and trainer.steps % checkpoint_every == 0:
+            trainer.agent.save(run_dir=run_dir, checkpoint=True, keep_last=keep_last)
+            trainer._save_trainer_state(run_dir, run_id, checkpoint=True, keep_last=keep_last)
         yield idx, row, result, after_trade_value, mtm_delta, trade_impact
 
         idx += 1
@@ -85,7 +116,15 @@ def run_loop(
 
 
 def stream_live(
-    trainer: Trainer, feed: DataFeed, delay: float
+    trainer: Trainer,
+    feed: DataFeed,
+    delay: float,
+    *,
+    run_id: str,
+    run_dir: Path,
+    checkpoint_every: int,
+    flush_trades_every: int,
+    keep_last: int,
 ) -> Iterable[tuple[int, pd.Series, StepResult, float, float, float]]:
     """Continuously fetch new market data and yield trading events indefinitely."""
 
@@ -115,6 +154,12 @@ def stream_live(
             trade_impact = after_trade_value - before_trade_value
             mtm_delta = after_trade_value - pv_prev_after
             pv_prev_after = after_trade_value
+
+            if flush_trades_every > 0 and trainer.steps % flush_trades_every == 0:
+                trainer._flush_trades_and_metrics(run_dir)
+            if checkpoint_every > 0 and trainer.steps % checkpoint_every == 0:
+                trainer.agent.save(run_dir=run_dir, checkpoint=True, keep_last=keep_last)
+                trainer._save_trainer_state(run_dir, run_id, checkpoint=True, keep_last=keep_last)
 
             yield idx, row, result, after_trade_value, mtm_delta, trade_impact
 
@@ -148,22 +193,65 @@ def main() -> None:
         candles_for_window = math.ceil(args.duration / timeframe_to_minutes(args.timeframe))
         limit = max(limit, candles_for_window)
 
+    base_run_dir = Path(config.RUNS_DIR)
+    base_run_dir.mkdir(parents=True, exist_ok=True)
+    run_id = args.run_id.replace("/", "_") if args.run_id else None
+    run_dir = Path(args.run_dir) if args.run_dir else None
+    if args.resume:
+        if run_dir is None:
+            candidates = [d for d in base_run_dir.iterdir() if d.is_dir()]
+            run_dir = max(candidates, key=lambda d: d.stat().st_mtime) if candidates else None
+        if run_dir is not None:
+            run_id = run_id or run_dir.name
+        else:
+            run_id = run_id or generate_run_id(args.symbol, args.timeframe)
+            run_dir = base_run_dir / run_id
+    else:
+        run_id = run_id or generate_run_id(args.symbol, args.timeframe)
+        run_dir = run_dir or base_run_dir / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
     feed = DataFeed(
         MarketConfig(symbol=args.symbol, timeframe=args.timeframe, limit=limit, offline=args.offline)
     )
 
     agent = BanditAgent()
+    agent.state.run_id = agent.state.run_id or run_id
+    agent.state.symbol = agent.state.symbol or args.symbol
+    agent.state.timeframe = agent.state.timeframe or args.timeframe
     trainer = Trainer(agent)
+    if args.resume:
+        resume_from(run_dir, agent, trainer)
     web_dashboard = WebDashboard(port=args.web_port) if args.web_dashboard else None
     if web_dashboard:
         web_dashboard.start()
 
     if args.continuous:
-        loop = stream_live(trainer, feed, args.delay)
+        loop = stream_live(
+            trainer,
+            feed,
+            args.delay,
+            run_id=run_id,
+            run_dir=run_dir,
+            checkpoint_every=args.checkpoint_every,
+            flush_trades_every=args.flush_trades_every,
+            keep_last=args.keep_last,
+        )
     else:
         raw_frame, _ = feed.fetch()
         feature_frame = compute_indicators(raw_frame)
-        loop = run_loop(trainer, feature_frame, args.steps, args.duration, args.delay)
+        loop = run_loop(
+            trainer,
+            feature_frame,
+            args.steps,
+            args.duration,
+            args.delay,
+            run_id=run_id,
+            run_dir=run_dir,
+            checkpoint_every=args.checkpoint_every,
+            flush_trades_every=args.flush_trades_every,
+            keep_last=args.keep_last,
+        )
 
     try:
         if args.dashboard:
@@ -255,7 +343,9 @@ def main() -> None:
     except KeyboardInterrupt:
         print("Interrupted; saving agent state before exit...")
     finally:
-        trainer.agent.save()
+        trainer._flush_trades_and_metrics(run_dir, force=True)
+        trainer.agent.save(run_dir=run_dir, keep_last=args.keep_last)
+        trainer._save_trainer_state(run_dir, run_id, checkpoint=False, keep_last=args.keep_last)
 
         if web_dashboard:
             web_dashboard.stop()
