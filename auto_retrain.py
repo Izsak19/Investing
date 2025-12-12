@@ -13,6 +13,7 @@ import pandas as pd
 from src import config
 from src.agent import BanditAgent
 from src.data_feed import DataFeed, MarketConfig
+from src.metrics import compute_max_drawdown
 from src.trainer import Trainer
 from src.persistence import atomic_write_text
 
@@ -25,6 +26,7 @@ class Metrics:
     max_drawdown: float
     realized_pnl: float
     baseline_final_value: float
+    ma_baseline_final_value: float
 
 
 def timeframe_to_minutes(timeframe: str) -> float:
@@ -89,16 +91,50 @@ def buy_and_hold_baseline(frame: pd.DataFrame, initial_cash: float) -> float:
     return final_cash
 
 
-def compute_max_drawdown(equity_curve: list[float]) -> float:
-    peak = -float("inf")
-    max_dd = 0.0
-    for value in equity_curve:
-        peak = max(peak, value)
-        if peak <= 0:
-            continue
-        drawdown = (peak - value) / peak
-        max_dd = max(max_dd, drawdown)
-    return max_dd
+def moving_average_crossover_baseline(
+    frame: pd.DataFrame, initial_cash: float, fast: int = 10, slow: int = 30
+) -> float:
+    if frame.empty or len(frame) < slow:
+        return initial_cash
+
+    prices = frame["close"].astype(float)
+    fast_ma = prices.rolling(fast, min_periods=1).mean()
+    slow_ma = prices.rolling(slow, min_periods=1).mean()
+
+    cash = initial_cash
+    position = 0.0
+    entry_price = 0.0
+
+    for idx in range(1, len(frame)):
+        price = float(prices.iloc[idx])
+        prev_fast, prev_slow = float(fast_ma.iloc[idx - 1]), float(slow_ma.iloc[idx - 1])
+        curr_fast, curr_slow = float(fast_ma.iloc[idx]), float(slow_ma.iloc[idx])
+
+        cross_up = prev_fast <= prev_slow and curr_fast > curr_slow
+        cross_down = prev_fast >= prev_slow and curr_fast < curr_slow
+
+        if cross_up and cash > 0:
+            fee = cash * config.FEE_RATE
+            investable_base = cash - fee
+            turnover_penalty = investable_base * config.TURNOVER_PENALTY
+            investable = max(0.0, investable_base - turnover_penalty)
+            position = investable / max(price, 1e-6)
+            cash = 0.0
+            entry_price = price
+        elif cross_down and position > 0:
+            gross = position * price
+            fee = gross * config.FEE_RATE
+            turnover_penalty = gross * config.TURNOVER_PENALTY
+            cash = gross - fee - turnover_penalty
+            position = 0.0
+            entry_price = 0.0
+
+    if position > 0:
+        gross = position * float(prices.iloc[-1])
+        fee = gross * config.FEE_RATE
+        turnover_penalty = gross * config.TURNOVER_PENALTY
+        cash = gross - fee - turnover_penalty
+    return cash
 
 
 def evaluate_agent(
@@ -110,6 +146,7 @@ def evaluate_agent(
     run_id: str,
     data_is_live: bool,
     baseline_final_value: float | None = None,
+    ma_baseline_final_value: float | None = None,
 ) -> Metrics:
     eval_trainer = Trainer(trainer.agent, initial_cash=initial_cash)
     eval_trainer.last_data_is_live = data_is_live
@@ -139,6 +176,7 @@ def evaluate_agent(
         val_final_value=final_value if baseline_final_value is not None else None,
         max_drawdown=max_drawdown,
         executed_trades=executed_trades,
+        ma_baseline_final_value=ma_baseline_final_value,
     )
 
     total_reward = sum(r for *_, r in eval_trainer.history)
@@ -149,6 +187,7 @@ def evaluate_agent(
         max_drawdown=max_drawdown,
         realized_pnl=realized_pnl,
         baseline_final_value=baseline_final_value or 0.0,
+        ma_baseline_final_value=ma_baseline_final_value or 0.0,
     )
 
 
@@ -219,6 +258,7 @@ def run_cycle(args: argparse.Namespace, cycle: int, run_dir: Path, run_id: str) 
     )
 
     val_baseline = buy_and_hold_baseline(val_frame, args.initial_cash)
+    val_ma_baseline = moving_average_crossover_baseline(val_frame, args.initial_cash)
     val_metrics = evaluate_agent(
         trainer,
         val_frame,
@@ -227,6 +267,7 @@ def run_cycle(args: argparse.Namespace, cycle: int, run_dir: Path, run_id: str) 
         run_id=run_id,
         data_is_live=is_live,
         baseline_final_value=val_baseline,
+        ma_baseline_final_value=val_ma_baseline,
     )
     backtest_metrics = evaluate_agent(
         trainer,
@@ -236,18 +277,22 @@ def run_cycle(args: argparse.Namespace, cycle: int, run_dir: Path, run_id: str) 
         run_id=run_id,
         data_is_live=is_live,
         baseline_final_value=buy_and_hold_baseline(validated, args.initial_cash),
+        ma_baseline_final_value=moving_average_crossover_baseline(validated, args.initial_cash),
     )
 
     threshold_value = val_baseline * (1 + args.min_profit_threshold / 100)
     print(
         "  Val:      "
         f"trades={val_metrics.executed_trades} | final_value={val_metrics.final_value:.2f} | "
-        f"baseline={val_baseline:.2f} | max_drawdown={val_metrics.max_drawdown:.3f}"
+        f"buy&hold={val_baseline:.2f} | ma_crossover={val_ma_baseline:.2f} | "
+        f"max_drawdown={val_metrics.max_drawdown:.3f}"
     )
     print(
         "  Backtest: "
         f"trades={backtest_metrics.executed_trades} | final_value={backtest_metrics.final_value:.2f} | "
-        f"baseline={backtest_metrics.baseline_final_value:.2f} | max_drawdown={backtest_metrics.max_drawdown:.3f}"
+        f"buy&hold={backtest_metrics.baseline_final_value:.2f} | "
+        f"ma_crossover={backtest_metrics.ma_baseline_final_value:.2f} | "
+        f"max_drawdown={backtest_metrics.max_drawdown:.3f}"
     )
 
     drawdown_ok = args.max_drawdown is None or val_metrics.max_drawdown <= args.max_drawdown

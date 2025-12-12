@@ -26,6 +26,10 @@ def build_table(
     step_win_rate: float,
     refill_count: int,
     sell_win_rate: float,
+    sharpe_ratio: float,
+    total_return: float,
+    max_drawdown: float,
+    action_distribution: dict[str, float],
 ) -> Table:
     table = Table(title="Lightweight BTC/USDT Trainer", expand=True)
     table.add_column("Metric", justify="left")
@@ -49,11 +53,17 @@ def build_table(
     table.add_row("Sell Win Rate", f"{sell_win_rate:.2%}")
     table.add_row("Step Win Rate", f"{step_win_rate:,.2f}%")
     table.add_row("Total Reward", f"{agent.state.total_reward:+.2f}")
+    table.add_row("Total Return", f"{total_return:+.2%}")
+    table.add_row("Sharpe Ratio", f"{sharpe_ratio:.3f}")
+    table.add_row("Max Drawdown", f"{max_drawdown:.2%}")
 
     q_values = Table.grid(expand=True)
     q_values.add_row("Q-values", ", ".join(f"{a}:{v:.3f}" for a, v in zip(ACTIONS, agent.state.q_values)))
     epsilon = agent.state.last_epsilon if hasattr(agent, "state") else config.EPSILON
     table.add_row("Exploration (eps)", f"{epsilon:.2f}")
+    if action_distribution:
+        dist_str = ", ".join(f"{k}:{v:.1%}" for k, v in action_distribution.items())
+        table.add_row("Action Mix", dist_str)
     table.add_row("", "")
     table.add_row("Q", Align.left(q_values))
     return table
@@ -61,7 +71,23 @@ def build_table(
 
 def live_dashboard(
     events: Iterable[
-        tuple[int, float, StepResult, float, float, float, Portfolio, BanditAgent, float, int, float]
+        tuple[
+            int,
+            float,
+            StepResult,
+            float,
+            float,
+            float,
+            Portfolio,
+            BanditAgent,
+            float,
+            int,
+            float,
+            float,
+            float,
+            float,
+            dict[str, float],
+        ]
     ]
 ):
     with Live(refresh_per_second=int(1 / config.DASHBOARD_REFRESH), console=console, screen=False) as live:
@@ -77,6 +103,10 @@ def live_dashboard(
             step_win_rate,
             refill_count,
             sell_win_rate,
+            sharpe_ratio,
+            total_return,
+            max_drawdown,
+            action_distribution,
         ) in events:
             live.update(
                 build_table(
@@ -91,5 +121,9 @@ def live_dashboard(
                     step_win_rate,
                     refill_count,
                     sell_win_rate,
+                    sharpe_ratio,
+                    total_return,
+                    max_drawdown,
+                    action_distribution,
                 )
             )

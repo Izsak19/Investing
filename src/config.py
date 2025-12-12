@@ -34,6 +34,8 @@ EPSILON_DECAY_STEPS = 200_000
 REWARD_SCALE = 50.0  # scales pct-return before tanh; tune 20–200
 EPSILON_WHEN_FLAT = 0.05  # exploration floor when not in position
 FLAT_EXPLORATION_WARMUP_STEPS = 20_000
+RISK_VOL_WINDOW = 200  # steps to use when estimating volatility for risk-adjusted rewards
+RISK_VOL_PENALTY = 0.25  # multiplier applied to rolling volatility when shaping rewards
 
 # Numerical stability safeguards
 # Caps for feature values and weights to prevent floating-point overflow when
@@ -47,6 +49,7 @@ ERROR_CLIP = 5.0
 # Trading friction to discourage churn and account for slippage beyond exchange
 # fees. Applied per executed trade as a percentage of the notional size.
 TURNOVER_PENALTY = 0.001
+ACTION_HISTORY_WINDOW = 5_000
 
 # Anti-churn safeguards
 MIN_HOLD_STEPS = 3

@@ -39,6 +39,12 @@ class TradeEvent:
     sell_win_rate: float
     realized_pnl: float
     data_is_live: bool
+    total_return: float
+    sharpe_ratio: float
+    max_drawdown: float
+    action_hold: float
+    action_buy: float
+    action_sell: float
 
 
 class WebDashboard:
@@ -122,8 +128,13 @@ class WebDashboard:
         sell_win_rate: float,
         realized_pnl: float,
         data_is_live: bool,
+        total_return: float,
+        sharpe_ratio: float,
+        max_drawdown: float,
+        action_distribution: Dict[str, float] | None = None,
     ) -> None:
         ts_str = "" if timestamp is None else str(timestamp)
+        action_distribution = action_distribution or {}
         with self._lock:
             next_id = (self._events[-1].id + 1) if self._events else 0
             event = TradeEvent(
@@ -153,6 +164,12 @@ class WebDashboard:
                 sell_win_rate=float(sell_win_rate),
                 realized_pnl=float(realized_pnl),
                 data_is_live=bool(data_is_live),
+                total_return=float(total_return),
+                sharpe_ratio=float(sharpe_ratio),
+                max_drawdown=float(max_drawdown),
+                action_hold=float(action_distribution.get("hold", 0.0)),
+                action_buy=float(action_distribution.get("buy", 0.0)),
+                action_sell=float(action_distribution.get("sell", 0.0)),
             )
             self._events.append(event)
             self._latest_metrics = {
@@ -173,6 +190,12 @@ class WebDashboard:
                 "sell_win_rate": float(sell_win_rate),
                 "realized_pnl": float(realized_pnl),
                 "data_is_live": bool(data_is_live),
+                "total_return": float(total_return),
+                "sharpe_ratio": float(sharpe_ratio),
+                "max_drawdown": float(max_drawdown),
+                "action_hold": float(action_distribution.get("hold", 0.0)),
+                "action_buy": float(action_distribution.get("buy", 0.0)),
+                "action_sell": float(action_distribution.get("sell", 0.0)),
             }
 
     @property

@@ -410,6 +410,10 @@ def main() -> None:
                             sell_win_rate=trainer.trade_win_rate,
                             realized_pnl=result.realized_pnl,
                             data_is_live=trainer.last_data_is_live or False,
+                            total_return=trainer.total_return,
+                            sharpe_ratio=trainer.sharpe_ratio,
+                            max_drawdown=trainer.max_drawdown,
+                            action_distribution=trainer.action_distribution,
                         )
                     yield (
                         step,
@@ -423,6 +427,10 @@ def main() -> None:
                         trainer.success_rate,
                         trainer.refill_count,
                         trainer.trade_win_rate,
+                        trainer.sharpe_ratio,
+                        trainer.total_return,
+                        trainer.max_drawdown,
+                        trainer.action_distribution,
                     )
 
             render(enrich(loop))
@@ -460,6 +468,10 @@ def main() -> None:
                             sell_win_rate=trainer.trade_win_rate,
                             realized_pnl=result.realized_pnl,
                             data_is_live=trainer.last_data_is_live or False,
+                            total_return=trainer.total_return,
+                            sharpe_ratio=trainer.sharpe_ratio,
+                            max_drawdown=trainer.max_drawdown,
+                            action_distribution=trainer.action_distribution,
                         )
                     yield
 
