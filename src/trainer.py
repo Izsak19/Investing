@@ -74,6 +74,41 @@ class TrainerState:
         return cls(**defaults)
 
 
+def build_features(row: pd.Series, portfolio: Portfolio) -> np.ndarray:
+    price = float(row["close"])
+    raw_features = row[INDICATOR_COLUMNS].to_numpy(dtype=float)
+    price_scale = max(price, 1e-6)
+    feature_values: list[float] = []
+
+    for col, value in zip(INDICATOR_COLUMNS, raw_features):
+        if col in {
+            "ma",
+            "ema",
+            "wma",
+            "boll_mid",
+            "boll_upper",
+            "boll_lower",
+            "vwap",
+            "sar",
+            "supertrend",
+        }:
+            feature_values.append((value - price) / price_scale)
+        elif col == "atr":
+            feature_values.append(value / price_scale)
+        elif col == "trix":
+            feature_values.append(value / 100.0)
+
+    pos_flag = 1.0 if portfolio.position > 0 else 0.0
+    portfolio_value = portfolio.value(price)
+    cash_frac = portfolio.cash / max(portfolio_value, 1e-6)
+    unrealized_ret = (price / portfolio.entry_price) - 1.0 if portfolio.position > 0 and portfolio.entry_price > 0 else 0.0
+
+    feature_values.extend([pos_flag, cash_frac, unrealized_ret])
+
+    features = np.clip(np.asarray(feature_values, dtype=float), -config.FEATURE_CLIP, config.FEATURE_CLIP)
+    return features
+
+
 class Trainer:
     def __init__(
         self,
@@ -97,6 +132,12 @@ class Trainer:
         self.winning_sells = 0
         self._last_price: float | None = None
         self._last_value: float | None = None
+
+    def reset_portfolio(self) -> None:
+        self.portfolio.cash = self.initial_cash
+        self.portfolio.position = 0.0
+        self.portfolio.entry_price = 0.0
+        self.portfolio.entry_value = 0.0
 
     def export_state(self, run_id: str) -> TrainerState:
         return TrainerState(
@@ -136,30 +177,7 @@ class Trainer:
         self.positive_steps = state.positive_steps
 
     def _build_features(self, row: pd.Series) -> np.ndarray:
-        price = float(row["close"])
-        raw_features = row[INDICATOR_COLUMNS].to_numpy(dtype=float)
-        price_scale = max(price, 1e-6)
-        feature_values: list[float] = []
-
-        for col, value in zip(INDICATOR_COLUMNS, raw_features):
-            if col in {
-                "ma",
-                "ema",
-                "wma",
-                "boll_mid",
-                "boll_upper",
-                "boll_lower",
-                "vwap",
-                "sar",
-                "supertrend",
-            }:
-                feature_values.append((value - price) / price_scale)
-            elif col == "atr":
-                feature_values.append(value / price_scale)
-            elif col == "trix":
-                feature_values.append(value / 100.0)
-        features = np.clip(np.asarray(feature_values, dtype=float), -config.FEATURE_CLIP, config.FEATURE_CLIP)
-        return features
+        return build_features(row, self.portfolio)
 
     def step(self, row: pd.Series, next_row: pd.Series, step_idx: int) -> StepResult:
         price_now = float(row["close"])
@@ -437,6 +455,5 @@ def load_latest_run(run_dir: Path) -> tuple[AgentState, TrainerState]:
 def resume_from(run_dir: Path, agent: BanditAgent, trainer: Trainer) -> None:
     agent_state, trainer_state = load_latest_run(run_dir)
     agent.state = agent_state
-    agent._feature_size = len(agent.state.indicator_columns) or len(INDICATOR_COLUMNS)
-    agent._ensure_weight_shape()
+    agent._prepare_state()
     trainer.import_state(trainer_state)

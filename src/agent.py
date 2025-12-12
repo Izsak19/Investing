@@ -14,6 +14,7 @@ from src.persistence import atomic_write_json
 
 
 ACTIONS = ["sell", "hold", "buy"]
+FEATURE_COLUMNS = INDICATOR_COLUMNS + ["pos_flag", "cash_frac", "unrealized_ret"]
 
 
 @dataclass
@@ -32,15 +33,15 @@ class AgentState:
     alpha: float = config.ALPHA
     feature_clip: float = config.FEATURE_CLIP
     weight_clip: float = config.WEIGHT_CLIP
-    indicator_columns: list[str] = field(default_factory=lambda: INDICATOR_COLUMNS[:])
+    indicator_columns: list[str] = field(default_factory=lambda: FEATURE_COLUMNS[:])
 
     @classmethod
     def default(cls) -> "AgentState":
         return cls(
             q_values=[0.0, 0.0, 0.0],
-            weights=[[0.0 for _ in INDICATOR_COLUMNS] for _ in ACTIONS],
+            weights=[[0.0 for _ in FEATURE_COLUMNS] for _ in ACTIONS],
             last_epsilon=config.EPSILON_START,
-            indicator_columns=INDICATOR_COLUMNS[:],
+            indicator_columns=FEATURE_COLUMNS[:],
         )
 
     def to_json(self, path: Path) -> None:
@@ -52,7 +53,7 @@ class AgentState:
             return cls.default()
         data = json.loads(path.read_text())
         if "weights" not in data:
-            data["weights"] = [[0.0 for _ in INDICATOR_COLUMNS] for _ in ACTIONS]
+            data["weights"] = [[0.0 for _ in FEATURE_COLUMNS] for _ in ACTIONS]
         if "q_values" not in data:
             data["q_values"] = [0.0, 0.0, 0.0]
         if "steps_seen" not in data:
@@ -71,7 +72,7 @@ class AgentState:
         data.setdefault("alpha", config.ALPHA)
         data.setdefault("feature_clip", config.FEATURE_CLIP)
         data.setdefault("weight_clip", config.WEIGHT_CLIP)
-        data.setdefault("indicator_columns", INDICATOR_COLUMNS[:])
+        data.setdefault("indicator_columns", FEATURE_COLUMNS[:])
         return cls(**data)
 
 
@@ -80,11 +81,7 @@ class BanditAgent:
 
     def __init__(self):
         self.state = AgentState.from_json(Path(config.STATE_PATH))
-        self._feature_size = len(self.state.indicator_columns) or len(INDICATOR_COLUMNS)
-        if self._feature_size != len(INDICATOR_COLUMNS):
-            self.state.indicator_columns = INDICATOR_COLUMNS[:]
-            self._feature_size = len(INDICATOR_COLUMNS)
-        self._ensure_weight_shape()
+        self._prepare_state()
 
     @staticmethod
     def _sanitize(features: np.ndarray) -> np.ndarray:
@@ -111,9 +108,46 @@ class BanditAgent:
             if len(self.state.weights[i]) != self._feature_size:
                 self.state.weights[i] = [0.0 for _ in range(self._feature_size)]
 
+    def _clip_weights(self, weights: list[list[float]]) -> list[list[float]]:
+        bounded = np.clip(np.asarray(weights, dtype=float), -config.WEIGHT_CLIP, config.WEIGHT_CLIP)
+        return bounded.tolist()
+
+    def _migrate_weights(self) -> None:
+        """Align persisted weights with the current feature set."""
+
+        new_columns = FEATURE_COLUMNS
+        new_weights = np.zeros((len(ACTIONS), len(new_columns)), dtype=float)
+        current_columns = list(self.state.indicator_columns or [])
+        base_cols = len(current_columns) if current_columns else len(new_columns)
+        source = np.asarray(self.state.weights, dtype=float)
+        if source.ndim != 2 or source.shape[0] != len(ACTIONS) or source.shape[1] == 0:
+            source = np.zeros((len(ACTIONS), base_cols), dtype=float)
+        column_map = {name: idx for idx, name in enumerate(current_columns)}
+        for new_idx, name in enumerate(new_columns):
+            old_idx = column_map.get(name)
+            if old_idx is None:
+                continue
+            if old_idx >= source.shape[1]:
+                continue
+            new_weights[:, new_idx] = source[:, old_idx]
+        clipped = np.clip(new_weights, -config.WEIGHT_CLIP, config.WEIGHT_CLIP)
+        self.state.weights = clipped.tolist()
+        self.state.indicator_columns = new_columns[:]
+        self._feature_size = len(new_columns)
+
     def _estimate_rewards(self, features: np.ndarray) -> np.ndarray:
         safe_features = self._sanitize(features)
         return np.dot(np.asarray(self.state.weights), safe_features)
+
+    def _prepare_state(self) -> None:
+        self._feature_size = len(self.state.indicator_columns) or len(FEATURE_COLUMNS)
+        if not self.state.indicator_columns:
+            self.state.indicator_columns = FEATURE_COLUMNS[:]
+        if self.state.indicator_columns != FEATURE_COLUMNS:
+            self._migrate_weights()
+        self._feature_size = len(self.state.indicator_columns) or len(FEATURE_COLUMNS)
+        self.state.weights = self._clip_weights(self.state.weights)
+        self._ensure_weight_shape()
 
     def current_epsilon(self, step: int | None = None) -> float:
         t = step if step is not None else self.state.steps_seen
@@ -130,15 +164,16 @@ class BanditAgent:
         *,
         allowed: list[str] | None = None,
         step: int | None = None,
+        epsilon_override: float | None = None,
     ) -> str:
         estimates = self._estimate_rewards(features)
         self.state.q_values = list(estimates)
 
         actions = allowed if allowed is not None else ACTIONS
 
-        epsilon = self.current_epsilon(step)
+        epsilon = epsilon_override if epsilon_override is not None else self.current_epsilon(step)
         is_flat = "buy" in actions and "sell" not in actions
-        if is_flat:
+        if epsilon_override is None and is_flat and self.state.steps_seen < config.FLAT_EXPLORATION_WARMUP_STEPS:
             epsilon = max(epsilon, config.EPSILON_WHEN_FLAT)
         self.state.last_epsilon = epsilon
 

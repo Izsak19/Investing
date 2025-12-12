@@ -83,6 +83,12 @@ def run_loop(
     if row_count < 2:
         return []
 
+    episode_len = row_count - 1
+    if duration is None and steps > episode_len:
+        print(
+            "Warning: requested steps exceed available window; repeating episodes over the same data."
+        )
+
     first_price = float(frame.iloc[0]["close"])
     pv_prev_after = trainer.portfolio.value(first_price)
 
@@ -92,8 +98,13 @@ def run_loop(
         if duration is not None and time.monotonic() - start >= duration:
             break
 
-        row = frame.iloc[idx % row_count]
-        next_row = frame.iloc[(idx + 1) % row_count]
+        i = idx % episode_len
+        row = frame.iloc[i]
+        next_row = frame.iloc[i + 1]
+
+        if i == 0 and idx > 0:
+            trainer.reset_portfolio()
+            pv_prev_after = trainer.portfolio.value(float(row["close"]))
         price = float(row["close"])
 
         before_trade_value = trainer.portfolio.value(price)
