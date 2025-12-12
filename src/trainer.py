@@ -243,11 +243,17 @@ class Trainer:
             investable = investable_base - turnover_penalty
             if investable > 0:
                 trade_executed = True
-                self.portfolio.position = investable / price_now
-                # Track effective cost basis per unit including the buy fee
-                self.portfolio.entry_price = price_now / (1 - config.FEE_RATE)
+                trade_size = investable / price_now
+                prior_position = self.portfolio.position
+                prior_cost_basis = prior_position * self.portfolio.entry_price
+                new_position = prior_position + trade_size
+                total_cost_basis = prior_cost_basis + trade_cash
+                # Track effective cost basis per unit including fees/penalties
+                self.portfolio.entry_price = total_cost_basis / max(new_position, 1e-9)
+                self.portfolio.position = new_position
                 self.portfolio.cash = cash_before - trade_cash
-                self.portfolio.entry_value = value_before
+                if prior_position == 0:
+                    self.portfolio.entry_value = value_before
                 self.last_trade_step = self.steps
                 self.last_entry_step = self.steps
             else:
