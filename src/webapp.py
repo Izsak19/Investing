@@ -37,6 +37,7 @@ class TradeEvent:
     position: float
     executed_trades: int
     sell_win_rate: float
+    realized_pnl: float
 
 
 class WebDashboard:
@@ -118,6 +119,7 @@ class WebDashboard:
         refill_count: int,
         executed_trades: int,
         sell_win_rate: float,
+        realized_pnl: float,
     ) -> None:
         ts_str = "" if timestamp is None else str(timestamp)
         with self._lock:
@@ -147,6 +149,7 @@ class WebDashboard:
                 position=float(position),
                 executed_trades=int(executed_trades),
                 sell_win_rate=float(sell_win_rate),
+                realized_pnl=float(realized_pnl),
             )
             self._events.append(event)
             self._latest_metrics = {
@@ -165,6 +168,7 @@ class WebDashboard:
                 "refill_count": int(refill_count),
                 "executed_trades": int(executed_trades),
                 "sell_win_rate": float(sell_win_rate),
+                "realized_pnl": float(realized_pnl),
             }
 
     @property

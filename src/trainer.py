@@ -22,6 +22,7 @@ class Portfolio:
     cash: float = 1000.0
     position: float = 0.0
     entry_price: float = 0.0
+    entry_value: float = 0.0
 
     def value(self, price: float) -> float:
         return self.cash + self.position * price
@@ -36,6 +37,7 @@ class StepResult:
     fee_paid: float
     turnover_penalty: float
     refilled: bool
+    realized_pnl: float
 
 
 @dataclass
@@ -55,6 +57,7 @@ class TrainerState:
     portfolio_cash: float = 0.0
     portfolio_position: float = 0.0
     portfolio_entry_price: float = 0.0
+    portfolio_entry_value: float = 0.0
     total_steps: int = 0
     positive_steps: int = 0
 
@@ -111,6 +114,7 @@ class Trainer:
             portfolio_cash=self.portfolio.cash,
             portfolio_position=self.portfolio.position,
             portfolio_entry_price=self.portfolio.entry_price,
+            portfolio_entry_value=self.portfolio.entry_value,
             total_steps=self.total_steps,
             positive_steps=self.positive_steps,
         )
@@ -127,6 +131,7 @@ class Trainer:
         self.portfolio.cash = state.portfolio_cash
         self.portfolio.position = state.portfolio_position
         self.portfolio.entry_price = state.portfolio_entry_price
+        self.portfolio.entry_value = state.portfolio_entry_value
         self.total_steps = state.total_steps
         self.positive_steps = state.positive_steps
 
@@ -171,40 +176,51 @@ class Trainer:
         trade_executed = False
         fee_paid = 0.0
         turnover_penalty = 0.0
+        realized_pnl = 0.0
+
+        value_before = self.portfolio.value(price_now)
+        position_before = self.portfolio.position
+        cash_before = self.portfolio.cash
 
         # Naive execution model. Rewards are always computed on net proceeds
         # after fees so the agent learns the true cost of transacting. Buying
         # does not deliver an immediate reward, but the eventual sell reward
         # incorporates both the buy and sell fees because the cost basis is
         # fee-adjusted.
-        if action == "buy" and self.portfolio.cash > 0:
+        if action == "buy" and cash_before > 0:
+            fee_paid = cash_before * config.FEE_RATE
+            turnover_penalty = (cash_before - fee_paid) * config.TURNOVER_PENALTY
+            investable = cash_before - fee_paid - turnover_penalty
+            if investable > 0:
+                trade_executed = True
+                self.portfolio.position = investable / price_now
+                # Track effective cost basis per unit including the buy fee
+                self.portfolio.entry_price = price_now / (1 - config.FEE_RATE)
+                self.portfolio.cash = 0.0
+                self.portfolio.entry_value = value_before
+            else:
+                action = "hold"
+                fee_paid = 0.0
+                turnover_penalty = 0.0
+        elif action == "sell" and position_before > 0:
             trade_executed = True
-            fee_paid = self.portfolio.cash * config.FEE_RATE
-            investable = self.portfolio.cash - fee_paid
-            turnover_penalty = investable * config.TURNOVER_PENALTY
-            self.portfolio.position = investable / price_now
-            # Track effective cost basis per unit including the buy fee
-            self.portfolio.entry_price = price_now / (1 - config.FEE_RATE)
-            self.portfolio.cash = -turnover_penalty
-        elif action == "sell" and self.portfolio.position > 0:
-            trade_executed = True
-            gross_proceeds = self.portfolio.position * price_now
+            gross_proceeds = position_before * price_now
             fee_paid = gross_proceeds * config.FEE_RATE
-            net_proceeds = gross_proceeds - fee_paid
             turnover_penalty = gross_proceeds * config.TURNOVER_PENALTY
-            net_after_penalty = net_proceeds - turnover_penalty
-            self.portfolio.cash = net_after_penalty
+            net = gross_proceeds - fee_paid - turnover_penalty
+            self.portfolio.cash = net
             self.portfolio.position = 0.0
+            realized_pnl = self.portfolio.cash - self.portfolio.entry_value
             self.portfolio.entry_price = 0.0
+            self.portfolio.entry_value = 0.0
 
-        value_now = self.portfolio.value(price_now)
         value_next = self.portfolio.value(price_next)
-        reward = value_next - value_now
+        reward = value_next - value_before
 
         # Normalize reward by account value so updates reflect percentage returns
         # and stay bounded during long runs.
-        denominator = max(abs(value_now), config.INITIAL_CASH, 1e-6)
-        scaled_reward = math.tanh(reward / denominator)
+        pct = reward / max(abs(value_before), 1e-6)
+        scaled_reward = math.tanh(pct * config.REWARD_SCALE)
         next_features = self._build_features(next_row)
         next_allowed_actions = ["hold"]
         if self.portfolio.position > 0:
@@ -229,7 +245,7 @@ class Trainer:
         self.total_turnover_penalty_paid += turnover_penalty
         if action == "sell" and trade_executed:
             self.sell_trades += 1
-            if reward > 0:
+            if realized_pnl > 0:
                 self.winning_sells += 1
 
         self._last_price = price_now
@@ -243,6 +259,7 @@ class Trainer:
             fee_paid=fee_paid,
             turnover_penalty=turnover_penalty,
             refilled=refilled,
+            realized_pnl=realized_pnl,
         )
 
     def _maybe_refill_portfolio(self) -> bool:
@@ -262,6 +279,7 @@ class Trainer:
         if self.portfolio.cash < self.min_cash:
             self.portfolio.cash = self.initial_cash
             self.portfolio.entry_price = 0.0
+            self.portfolio.entry_value = 0.0
             self.refill_count += 1
             return True
         return False

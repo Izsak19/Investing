@@ -137,6 +137,9 @@ class BanditAgent:
         actions = allowed if allowed is not None else ACTIONS
 
         epsilon = self.current_epsilon(step)
+        is_flat = "buy" in actions and "sell" not in actions
+        if is_flat:
+            epsilon = max(epsilon, config.EPSILON_WHEN_FLAT)
         self.state.last_epsilon = epsilon
 
         if np.random.random() < epsilon:

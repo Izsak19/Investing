@@ -35,6 +35,7 @@ def build_table(
     table.add_row("Close Price", f"{price:,.2f}")
     table.add_row("Action", result.action.upper())
     table.add_row("Trainer Reward", f"{result.trainer_reward:+.4f}")
+    table.add_row("Realized PnL", f"{result.realized_pnl:+.4f}")
     table.add_row("Portfolio Δ (MTM)", f"{mtm_delta:+.4f}")
     table.add_row("Trade Impact", f"{trade_impact:+.4f}")
     table.add_row("Fee", f"{result.fee_paid:+.4f}")

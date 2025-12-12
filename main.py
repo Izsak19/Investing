@@ -287,6 +287,7 @@ def main() -> None:
                             refill_count=trainer.refill_count,
                             executed_trades=trainer.agent.state.trades,
                             sell_win_rate=trainer.trade_win_rate,
+                            realized_pnl=result.realized_pnl,
                         )
                     yield (
                         step,
@@ -335,6 +336,7 @@ def main() -> None:
                             refill_count=trainer.refill_count,
                             executed_trades=trainer.agent.state.trades,
                             sell_win_rate=trainer.trade_win_rate,
+                            realized_pnl=result.realized_pnl,
                         )
                     yield
 
