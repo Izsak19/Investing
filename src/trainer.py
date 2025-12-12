@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import math
 import csv
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Tuple
 
+import numpy as np
 import pandas as pd
 
 from src.agent import BanditAgent
@@ -54,20 +55,48 @@ class Trainer:
         self.steps = 0
         self.sell_trades = 0
         self.winning_sells = 0
+        self.prev_price: float | None = None
+        self.prev_value: float | None = None
 
     def step(self, row: pd.Series, step_idx: int) -> StepResult:
         price = float(row["close"])
         refilled = self._maybe_refill_portfolio()
+        if self.prev_price is None or refilled:
+            self.prev_price = price
+            self.prev_value = self.portfolio.value(price)
+
         raw_features = row[INDICATOR_COLUMNS].to_numpy(dtype=float)
-        # Normalize indicators by the current close so the bandit sees mostly
-        # unit-scale inputs instead of raw price-denominated values that can
-        # blow up Q-values.
         price_scale = max(price, 1e-6)
-        features = raw_features / price_scale
-        action = self.agent.act(features)
+        feature_values: list[float] = []
+
+        for col, value in zip(INDICATOR_COLUMNS, raw_features):
+            if col in {
+                "ma",
+                "ema",
+                "wma",
+                "boll_mid",
+                "boll_upper",
+                "boll_lower",
+                "vwap",
+                "sar",
+                "supertrend",
+            }:
+                feature_values.append((value - price) / price_scale)
+            elif col == "atr":
+                feature_values.append(value / price_scale)
+            elif col == "trix":
+                feature_values.append(value / 100.0)
+        features = np.clip(np.asarray(feature_values, dtype=float), -config.FEATURE_CLIP, config.FEATURE_CLIP)
+
+        allowed_actions = ["hold"]
+        if self.portfolio.position > 0:
+            allowed_actions.append("sell")
+        if self.portfolio.cash > 0:
+            allowed_actions.append("buy")
+
+        action = self.agent.act(features, allowed=allowed_actions, step=self.steps)
         reward = 0.0
         trade_executed = False
-        trade_penalty = 0.0
         fee_paid = 0.0
         turnover_penalty = 0.0
 
@@ -76,39 +105,35 @@ class Trainer:
         # does not deliver an immediate reward, but the eventual sell reward
         # incorporates both the buy and sell fees because the cost basis is
         # fee-adjusted.
+        value_before = self.portfolio.value(self.prev_price)
+
         if action == "buy" and self.portfolio.cash > 0:
             trade_executed = True
             fee_paid = self.portfolio.cash * config.FEE_RATE
             investable = self.portfolio.cash - fee_paid
             turnover_penalty = investable * config.TURNOVER_PENALTY
-            trade_penalty = turnover_penalty
             self.portfolio.position = investable / price
             # Track effective cost basis per unit including the buy fee
             self.portfolio.entry_price = price / (1 - config.FEE_RATE)
-            self.portfolio.cash = 0.0
+            self.portfolio.cash = -turnover_penalty
         elif action == "sell" and self.portfolio.position > 0:
             trade_executed = True
             gross_proceeds = self.portfolio.position * price
             fee_paid = gross_proceeds * config.FEE_RATE
             net_proceeds = gross_proceeds - fee_paid
             turnover_penalty = gross_proceeds * config.TURNOVER_PENALTY
-            trade_penalty = turnover_penalty
-            reward = net_proceeds - self.portfolio.entry_price * self.portfolio.position - trade_penalty
-            self.portfolio.cash = net_proceeds
+            net_after_penalty = net_proceeds - turnover_penalty
+            self.portfolio.cash = net_after_penalty
             self.portfolio.position = 0.0
             self.portfolio.entry_price = 0.0
-        else:
-            reward = (price - self.portfolio.entry_price) * self.portfolio.position
 
-        # Include a small penalty for each executed trade to discourage churn and
-        # approximate slippage beyond explicit exchange fees.
-        if trade_penalty and action == "buy":
-            reward -= trade_penalty
+        value_after = self.portfolio.value(price)
+        reward = value_after - value_before
 
-        # Normalize reward by exposure so updates reflect percentage returns and
-        # stay bounded during long runs.
-        exposure = max(abs(self.portfolio.position * price), price, 1e-6)
-        scaled_reward = math.tanh(reward / exposure)
+        # Normalize reward by account value so updates reflect percentage returns
+        # and stay bounded during long runs.
+        denominator = max(abs(value_before), config.INITIAL_CASH, 1e-6)
+        scaled_reward = math.tanh(reward / denominator)
         self.agent.update(
             action,
             scaled_reward,
@@ -116,6 +141,8 @@ class Trainer:
             actual_reward=reward,
             trade_executed=trade_executed,
         )
+        self.prev_price = price
+        self.prev_value = value_after
         self.history.append((step_idx, action, price, reward))
         self.total_trades += 1
         if reward > 0:
