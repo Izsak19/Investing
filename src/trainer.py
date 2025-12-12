@@ -45,8 +45,8 @@ class Trainer:
         self.agent = agent
         self.portfolio = Portfolio(cash=initial_cash)
         self.history: List[Tuple[int, str, float, float]] = []  # step, action, price, reward
-        self.total_trades: int = 0
-        self.successful_trades: int = 0
+        self.total_steps: int = 0
+        self.positive_steps: int = 0
         self.initial_cash = initial_cash
         self.min_cash = min_cash
         self.refill_count = 0
@@ -55,16 +55,9 @@ class Trainer:
         self.steps = 0
         self.sell_trades = 0
         self.winning_sells = 0
-        self.prev_price: float | None = None
-        self.prev_value: float | None = None
 
-    def step(self, row: pd.Series, step_idx: int) -> StepResult:
+    def _build_features(self, row: pd.Series) -> np.ndarray:
         price = float(row["close"])
-        refilled = self._maybe_refill_portfolio()
-        if self.prev_price is None or refilled:
-            self.prev_price = price
-            self.prev_value = self.portfolio.value(price)
-
         raw_features = row[INDICATOR_COLUMNS].to_numpy(dtype=float)
         price_scale = max(price, 1e-6)
         feature_values: list[float] = []
@@ -87,7 +80,13 @@ class Trainer:
             elif col == "trix":
                 feature_values.append(value / 100.0)
         features = np.clip(np.asarray(feature_values, dtype=float), -config.FEATURE_CLIP, config.FEATURE_CLIP)
+        return features
 
+    def step(self, row: pd.Series, next_row: pd.Series, step_idx: int) -> StepResult:
+        price_now = float(row["close"])
+        price_next = float(next_row["close"])
+        refilled = self._maybe_refill_portfolio()
+        features = self._build_features(row)
         allowed_actions = ["hold"]
         if self.portfolio.position > 0:
             allowed_actions.append("sell")
@@ -95,7 +94,6 @@ class Trainer:
             allowed_actions.append("buy")
 
         action = self.agent.act(features, allowed=allowed_actions, step=self.steps)
-        reward = 0.0
         trade_executed = False
         fee_paid = 0.0
         turnover_penalty = 0.0
@@ -105,20 +103,18 @@ class Trainer:
         # does not deliver an immediate reward, but the eventual sell reward
         # incorporates both the buy and sell fees because the cost basis is
         # fee-adjusted.
-        value_before = self.portfolio.value(self.prev_price)
-
         if action == "buy" and self.portfolio.cash > 0:
             trade_executed = True
             fee_paid = self.portfolio.cash * config.FEE_RATE
             investable = self.portfolio.cash - fee_paid
             turnover_penalty = investable * config.TURNOVER_PENALTY
-            self.portfolio.position = investable / price
+            self.portfolio.position = investable / price_now
             # Track effective cost basis per unit including the buy fee
-            self.portfolio.entry_price = price / (1 - config.FEE_RATE)
+            self.portfolio.entry_price = price_now / (1 - config.FEE_RATE)
             self.portfolio.cash = -turnover_penalty
         elif action == "sell" and self.portfolio.position > 0:
             trade_executed = True
-            gross_proceeds = self.portfolio.position * price
+            gross_proceeds = self.portfolio.position * price_now
             fee_paid = gross_proceeds * config.FEE_RATE
             net_proceeds = gross_proceeds - fee_paid
             turnover_penalty = gross_proceeds * config.TURNOVER_PENALTY
@@ -127,26 +123,33 @@ class Trainer:
             self.portfolio.position = 0.0
             self.portfolio.entry_price = 0.0
 
-        value_after = self.portfolio.value(price)
-        reward = value_after - value_before
+        value_now = self.portfolio.value(price_now)
+        value_next = self.portfolio.value(price_next)
+        reward = value_next - value_now
 
         # Normalize reward by account value so updates reflect percentage returns
         # and stay bounded during long runs.
-        denominator = max(abs(value_before), config.INITIAL_CASH, 1e-6)
+        denominator = max(abs(value_now), config.INITIAL_CASH, 1e-6)
         scaled_reward = math.tanh(reward / denominator)
+        next_features = self._build_features(next_row)
+        next_allowed_actions = ["hold"]
+        if self.portfolio.position > 0:
+            next_allowed_actions.append("sell")
+        if self.portfolio.cash > 0:
+            next_allowed_actions.append("buy")
         self.agent.update(
             action,
             scaled_reward,
             features,
             actual_reward=reward,
             trade_executed=trade_executed,
+            next_features=next_features,
+            allowed_next=next_allowed_actions,
         )
-        self.prev_price = price
-        self.prev_value = value_after
-        self.history.append((step_idx, action, price, reward))
-        self.total_trades += 1
+        self.history.append((step_idx, action, price_now, reward))
+        self.total_steps += 1
         if reward > 0:
-            self.successful_trades += 1
+            self.positive_steps += 1
         self.steps += 1
         self.total_fee_paid += fee_paid
         self.total_turnover_penalty_paid += turnover_penalty
@@ -188,9 +191,13 @@ class Trainer:
 
     @property
     def success_rate(self) -> float:
-        if self.total_trades == 0:
+        if self.total_steps == 0:
             return 0.0
-        return (self.successful_trades / self.total_trades) * 100
+        return (self.positive_steps / self.total_steps) * 100
+
+    @property
+    def step_win_rate(self) -> float:
+        return self.success_rate
 
     @property
     def trade_win_rate(self) -> float:
@@ -198,8 +205,11 @@ class Trainer:
 
     def run(self, frame: pd.DataFrame, max_steps: int | None = None) -> None:
         steps = max_steps if max_steps is not None else len(frame)
-        for idx, row in frame.head(steps).iterrows():
-            self.step(row, idx)
+        effective_steps = min(steps, max(0, len(frame) - 1))
+        for offset in range(effective_steps):
+            row = frame.iloc[offset]
+            next_row = frame.iloc[offset + 1]
+            self.step(row, next_row, frame.index[offset])
         self.agent.save()
         self._persist_trades()
 

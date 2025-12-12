@@ -21,12 +21,14 @@ class AgentState:
     total_reward: float = 0.0
     trades: int = 0
     steps_seen: int = 0
+    last_epsilon: float = 0.0
 
     @classmethod
     def default(cls) -> "AgentState":
         return cls(
             q_values=[0.0, 0.0, 0.0],
             weights=[[0.0 for _ in INDICATOR_COLUMNS] for _ in ACTIONS],
+            last_epsilon=config.EPSILON_START,
         )
 
     def to_json(self, path: Path) -> None:
@@ -42,6 +44,8 @@ class AgentState:
             data["weights"] = [[0.0 for _ in INDICATOR_COLUMNS] for _ in ACTIONS]
         if "steps_seen" not in data:
             data["steps_seen"] = 0
+        if "last_epsilon" not in data:
+            data["last_epsilon"] = config.EPSILON_START
         return cls(**data)
 
 
@@ -82,6 +86,15 @@ class BanditAgent:
         safe_features = self._sanitize(features)
         return np.dot(np.asarray(self.state.weights), safe_features)
 
+    def current_epsilon(self, step: int | None = None) -> float:
+        t = step if step is not None else self.state.steps_seen
+        progress = min(1.0, t / config.EPSILON_DECAY_STEPS)
+        epsilon = max(
+            config.EPSILON_END,
+            config.EPSILON_START + (config.EPSILON_END - config.EPSILON_START) * progress,
+        )
+        return float(epsilon)
+
     def act(
         self,
         features: np.ndarray,
@@ -94,12 +107,8 @@ class BanditAgent:
 
         actions = allowed if allowed is not None else ACTIONS
 
-        t = step if step is not None else self.state.steps_seen
-        progress = min(1.0, t / config.EPSILON_DECAY_STEPS)
-        epsilon = max(
-            config.EPSILON_END,
-            config.EPSILON_START + (config.EPSILON_END - config.EPSILON_START) * progress,
-        )
+        epsilon = self.current_epsilon(step)
+        self.state.last_epsilon = epsilon
 
         if np.random.random() < epsilon:
             return str(np.random.choice(actions))
@@ -117,11 +126,20 @@ class BanditAgent:
         *,
         actual_reward: float | None = None,
         trade_executed: bool = True,
+        next_features: np.ndarray | None = None,
+        allowed_next: list[str] | None = None,
     ) -> None:
         safe_features = self._sanitize(features)
         idx = ACTIONS.index(action)
         prediction = float(np.dot(self.state.weights[idx], safe_features))
-        error = float(np.clip(reward - prediction, -config.ERROR_CLIP, config.ERROR_CLIP))
+        target = reward
+        if config.USE_TD and next_features is not None:
+            safe_next = self._sanitize(next_features)
+            next_actions = allowed_next if allowed_next is not None else ACTIONS
+            next_idxs = [ACTIONS.index(a) for a in next_actions]
+            q_next = float(np.max(np.dot(np.asarray(self.state.weights)[next_idxs], safe_next)))
+            target = reward + config.GAMMA * q_next
+        error = float(np.clip(target - prediction, -config.ERROR_CLIP, config.ERROR_CLIP))
         updated = np.asarray(self.state.weights[idx]) + config.ALPHA * error * safe_features
         bounded = np.clip(updated, -config.WEIGHT_CLIP, config.WEIGHT_CLIP)
         self.state.weights[idx] = list(bounded)

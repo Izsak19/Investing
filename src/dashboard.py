@@ -23,7 +23,7 @@ def build_table(
     trade_impact: float,
     portfolio: Portfolio,
     agent: BanditAgent,
-    success_rate: float,
+    step_win_rate: float,
     refill_count: int,
     sell_win_rate: float,
 ) -> Table:
@@ -46,12 +46,13 @@ def build_table(
     table.add_row("Portfolio Value", f"{portfolio_value:,.2f}")
     table.add_row("Executed Trades", str(agent.state.trades))
     table.add_row("Sell Win Rate", f"{sell_win_rate:.2%}")
-    table.add_row("Success Rate", f"{success_rate:,.2f}%")
+    table.add_row("Step Win Rate", f"{step_win_rate:,.2f}%")
     table.add_row("Total Reward", f"{agent.state.total_reward:+.2f}")
 
     q_values = Table.grid(expand=True)
     q_values.add_row("Q-values", ", ".join(f"{a}:{v:.3f}" for a, v in zip(ACTIONS, agent.state.q_values)))
-    table.add_row("Exploration (eps)", f"{config.EPSILON:.2f}")
+    epsilon = agent.state.last_epsilon if hasattr(agent, "state") else config.EPSILON
+    table.add_row("Exploration (eps)", f"{epsilon:.2f}")
     table.add_row("", "")
     table.add_row("Q", Align.left(q_values))
     return table
@@ -72,7 +73,7 @@ def live_dashboard(
             trade_impact,
             portfolio,
             agent,
-            success_rate,
+            step_win_rate,
             refill_count,
             sell_win_rate,
         ) in events:
@@ -86,7 +87,7 @@ def live_dashboard(
                     trade_impact,
                     portfolio,
                     agent,
-                    success_rate,
+                    step_win_rate,
                     refill_count,
                     sell_win_rate,
                 )
