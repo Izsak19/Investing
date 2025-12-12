@@ -5,6 +5,7 @@ DEFAULT_TIMEFRAME = "1m"
 DEFAULT_LIMIT = 200
 STATE_PATH = "data/state.json"
 TRADE_LOG_PATH = "data/trades.csv"
+FEE_RATE = 0.001  # 0.1% per transaction on Binance spot
 
 # Hyperparameters for the simple bandit learner
 ALPHA = 0.2  # learning rate

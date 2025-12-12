@@ -37,12 +37,18 @@ class Trainer:
 
         # Naive execution model
         if action == "buy" and self.portfolio.cash > 0:
-            self.portfolio.position = self.portfolio.cash / price
-            self.portfolio.entry_price = price
+            fee = self.portfolio.cash * config.FEE_RATE
+            investable = self.portfolio.cash - fee
+            self.portfolio.position = investable / price
+            # Track effective cost basis per unit including the buy fee
+            self.portfolio.entry_price = price / (1 - config.FEE_RATE)
             self.portfolio.cash = 0.0
         elif action == "sell" and self.portfolio.position > 0:
-            self.portfolio.cash = self.portfolio.position * price
-            reward = self.portfolio.cash - self.portfolio.entry_price * self.portfolio.position
+            gross_proceeds = self.portfolio.position * price
+            fee = gross_proceeds * config.FEE_RATE
+            net_proceeds = gross_proceeds - fee
+            reward = net_proceeds - self.portfolio.entry_price * self.portfolio.position
+            self.portfolio.cash = net_proceeds
             self.portfolio.position = 0.0
             self.portfolio.entry_price = 0.0
         else:
