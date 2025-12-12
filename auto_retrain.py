@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Tuple
 
+import math
 import pandas as pd
 
 from src import config
@@ -72,34 +73,54 @@ def simulate_agent(agent: BanditAgent, frame: pd.DataFrame, initial_cash: float)
     rewards: list[float] = []
     successful = 0
 
-    for _, row in frame.iterrows():
-        price = float(row["close"])
+    for idx in range(max(0, len(frame) - 1)):
+        row = frame.iloc[idx]
+        next_row = frame.iloc[idx + 1]
+        price_now = float(row["close"])
+        price_next = float(next_row["close"])
         features = row[INDICATOR_COLUMNS].to_numpy(dtype=float)
-        action = agent.act(features)
+
+        allowed_actions = ["hold"]
+        if portfolio.position > 0:
+            allowed_actions.append("sell")
+        if portfolio.cash > 0:
+            allowed_actions.append("buy")
+
+        action = agent.act(features, allowed=allowed_actions, step=idx)
         reward = 0.0
 
-        if action == "buy" and portfolio.cash > 0:
-            fee = portfolio.cash * config.FEE_RATE
-            investable = portfolio.cash - fee
-            portfolio.position = investable / price
-            portfolio.entry_price = price / (1 - config.FEE_RATE)
-            portfolio.cash = 0.0
-        elif action == "sell" and portfolio.position > 0:
-            gross_proceeds = portfolio.position * price
-            fee = gross_proceeds * config.FEE_RATE
-            net_proceeds = gross_proceeds - fee
-            reward = net_proceeds - portfolio.entry_price * portfolio.position
-            portfolio.cash = net_proceeds
+        value_before = portfolio.value(price_now)
+        position_before = portfolio.position
+        cash_before = portfolio.cash
+
+        if action == "buy" and cash_before > 0:
+            fee_paid = cash_before * config.FEE_RATE
+            turnover_penalty = (cash_before - fee_paid) * config.TURNOVER_PENALTY
+            investable = cash_before - fee_paid - turnover_penalty
+            if investable > 0:
+                portfolio.position = investable / price_now
+                portfolio.entry_price = price_now / (1 - config.FEE_RATE)
+                portfolio.cash = 0.0
+                portfolio.entry_value = value_before
+        elif action == "sell" and position_before > 0:
+            gross = position_before * price_now
+            fee_paid = gross * config.FEE_RATE
+            turnover_penalty = gross * config.TURNOVER_PENALTY
+            net = gross - fee_paid - turnover_penalty
+            portfolio.cash = net
             portfolio.position = 0.0
             portfolio.entry_price = 0.0
-        else:
-            reward = (price - portfolio.entry_price) * portfolio.position
+            portfolio.entry_value = 0.0
+
+        value_next = portfolio.value(price_next)
+        reward = value_next - value_before
 
         rewards.append(reward)
         if reward > 0:
             successful += 1
 
-    final_value = portfolio.value(float(frame.iloc[-1]["close"])) if not frame.empty else portfolio.cash
+    final_price = float(frame.iloc[-1]["close"]) if not frame.empty else 0.0
+    final_value = portfolio.value(final_price) if not frame.empty else portfolio.cash
     success_rate = (successful / len(rewards) * 100) if rewards else 0.0
     return Metrics(success_rate=success_rate, trades=len(rewards), total_reward=sum(rewards), final_value=final_value)
 

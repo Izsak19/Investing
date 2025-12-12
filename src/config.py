@@ -24,6 +24,10 @@ EPSILON_START = 0.10
 EPSILON_END = 0.01
 EPSILON_DECAY_STEPS = 200_000
 
+# Reward scaling and exploration tweaks
+REWARD_SCALE = 50.0  # scales pct-return before tanh; tune 20–200
+EPSILON_WHEN_FLAT = 0.05  # exploration floor when not in position
+
 # Numerical stability safeguards
 # Caps for feature values and weights to prevent floating-point overflow when
 # running long training sessions. Normalizing indicators by price (see
