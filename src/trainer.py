@@ -35,7 +35,11 @@ class Trainer:
         action = self.agent.act()
         reward = 0.0
 
-        # Naive execution model
+        # Naive execution model. Rewards are always computed on net proceeds
+        # after fees so the agent learns the true cost of transacting. Buying
+        # does not deliver an immediate reward, but the eventual sell reward
+        # incorporates both the buy and sell fees because the cost basis is
+        # fee-adjusted.
         if action == "buy" and self.portfolio.cash > 0:
             fee = self.portfolio.cash * config.FEE_RATE
             investable = self.portfolio.cash - fee
