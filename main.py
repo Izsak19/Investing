@@ -54,6 +54,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint-every", type=int, default=config.DEFAULT_CHECKPOINT_EVERY)
     parser.add_argument("--flush-trades-every", type=int, default=config.DEFAULT_FLUSH_TRADES_EVERY)
     parser.add_argument("--keep-last", type=int, default=config.DEFAULT_KEEP_LAST_CHECKPOINTS)
+    parser.add_argument(
+        "--warmup-hours",
+        type=float,
+        default=0.0,
+        help="Optional preflight duration (hours) on the last 24h window before switching to live streaming.",
+    )
+    parser.add_argument(
+        "--warmup-profit-target",
+        type=float,
+        default=0.0,
+        help="Percentage gain on initial cash required before enabling --continuous mode (0 means breakeven).",
+    )
     return parser.parse_args()
 
 
@@ -203,6 +215,9 @@ def main() -> None:
     if args.offline and args.duration:
         candles_for_window = math.ceil(args.duration / timeframe_to_minutes(args.timeframe))
         limit = max(limit, candles_for_window)
+    if args.warmup_hours > 0:
+        candles_for_day = math.ceil((24 * 60) / timeframe_to_minutes(args.timeframe))
+        limit = max(limit, candles_for_day)
 
     base_run_dir = Path(config.RUNS_DIR)
     base_run_dir.mkdir(parents=True, exist_ok=True)
@@ -238,16 +253,61 @@ def main() -> None:
         web_dashboard.start()
 
     if args.continuous:
-        loop = stream_live(
-            trainer,
-            feed,
-            args.delay,
-            run_id=run_id,
-            run_dir=run_dir,
-            checkpoint_every=args.checkpoint_every,
-            flush_trades_every=args.flush_trades_every,
-            keep_last=args.keep_last,
-        )
+        raw_frame, _ = feed.fetch()
+        feature_frame = compute_indicators(raw_frame)
+
+        warmup_target = trainer.initial_cash * (1 + args.warmup_profit_target / 100)
+        warmup_seconds = args.warmup_hours * 3600
+        def warmup_then_stream():
+            warmup_hit = False
+
+            if args.warmup_hours > 0:
+                print(
+                    f"Starting warmup for up to {args.warmup_hours:.2f}h on the last 24h window "
+                    f"(target portfolio >= {warmup_target:.2f})."
+                )
+                for event in run_loop(
+                    trainer,
+                    feature_frame,
+                    args.steps,
+                    warmup_seconds,
+                    args.delay,
+                    run_id=run_id,
+                    run_dir=run_dir,
+                    checkpoint_every=args.checkpoint_every,
+                    flush_trades_every=args.flush_trades_every,
+                    keep_last=args.keep_last,
+                ):
+                    yield event
+                    _, _, _, portfolio_value, _, _ = event
+                    if portfolio_value >= warmup_target:
+                        warmup_hit = True
+                        print(
+                            f"Warmup profit target reached (portfolio {portfolio_value:.2f} >= {warmup_target:.2f}). "
+                            "Switching to live stream..."
+                        )
+                        break
+
+                if not warmup_hit:
+                    print(
+                        f"Warmup ended without reaching the profit target ({warmup_target:.2f}). "
+                        "Continuous mode will not start."
+                    )
+                    return
+
+            print("Starting continuous live stream...")
+            yield from stream_live(
+                trainer,
+                feed,
+                args.delay,
+                run_id=run_id,
+                run_dir=run_dir,
+                checkpoint_every=args.checkpoint_every,
+                flush_trades_every=args.flush_trades_every,
+                keep_last=args.keep_last,
+            )
+
+        loop = warmup_then_stream()
     else:
         raw_frame, _ = feed.fetch()
         feature_frame = compute_indicators(raw_frame)

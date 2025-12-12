@@ -45,6 +45,22 @@ The trainer consumes 1m candles by default, so each hour of learning is `60` ste
 
 If you prefer a different timeframe (e.g., `5m`), adjust `--timeframe` and rescale the `--steps` count accordingly.
 
+## Profit-gated warmup → continuous streaming
+Let the agent prove itself on the last 24h of candles before letting it run unattended:
+
+```bash
+# Warm up for 3 hours on the last 24h window until breakeven, then start live streaming
+python main.py --dashboard --warmup-hours 3 --warmup-profit-target 0 --continuous
+
+# Demand a 0.5% gain before going live (still capped at the warmup hours)
+python main.py --dashboard --warmup-hours 2 --warmup-profit-target 0.5 --continuous
+```
+
+- The warmup replays the most recent 24h window on a loop, applying indicators once and pausing per `--delay` so you can
+  watch the dashboard evolve.
+- Continuous streaming will *only* begin after the portfolio value clears the target on the warmup run; otherwise the run
+  stops to avoid unleashing an unprofitable policy.
+
 ## Learning loop (modern lightweight cycle)
 The code implements a lean version of the typical ML lifecycle:
 1. **Data ingestion** — `DataFeed` pulls live candles or generates synthetic data.
