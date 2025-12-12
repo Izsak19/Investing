@@ -15,6 +15,9 @@ MIN_TRAINING_CASH = 50.0
 ALPHA = 0.1  # learning rate
 GAMMA = 0.0  # no discounting for one-step reward
 EPSILON = 0.1  # exploration probability
+EPSILON_START = 0.10
+EPSILON_END = 0.01
+EPSILON_DECAY_STEPS = 200_000
 
 # Numerical stability safeguards
 # Caps for feature values and weights to prevent floating-point overflow when

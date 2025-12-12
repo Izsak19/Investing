@@ -20,6 +20,7 @@ class AgentState:
     weights: List[List[float]]
     total_reward: float = 0.0
     trades: int = 0
+    steps_seen: int = 0
 
     @classmethod
     def default(cls) -> "AgentState":
@@ -39,6 +40,8 @@ class AgentState:
         data = json.loads(path.read_text())
         if "weights" not in data:
             data["weights"] = [[0.0 for _ in INDICATOR_COLUMNS] for _ in ACTIONS]
+        if "steps_seen" not in data:
+            data["steps_seen"] = 0
         return cls(**data)
 
 
@@ -79,15 +82,32 @@ class BanditAgent:
         safe_features = self._sanitize(features)
         return np.dot(np.asarray(self.state.weights), safe_features)
 
-    def act(self, features: np.ndarray) -> str:
+    def act(
+        self,
+        features: np.ndarray,
+        *,
+        allowed: list[str] | None = None,
+        step: int | None = None,
+    ) -> str:
         estimates = self._estimate_rewards(features)
         self.state.q_values = list(estimates)
 
-        if np.random.random() < config.EPSILON:
-            choice = np.random.choice(ACTIONS)
-        else:
-            choice = ACTIONS[int(np.argmax(estimates))]
-        return choice
+        actions = allowed if allowed is not None else ACTIONS
+
+        t = step if step is not None else self.state.steps_seen
+        progress = min(1.0, t / config.EPSILON_DECAY_STEPS)
+        epsilon = max(
+            config.EPSILON_END,
+            config.EPSILON_START + (config.EPSILON_END - config.EPSILON_START) * progress,
+        )
+
+        if np.random.random() < epsilon:
+            return str(np.random.choice(actions))
+
+        allowed_estimates = {action: estimates[ACTIONS.index(action)] for action in actions}
+        best_estimate = max(allowed_estimates.values())
+        candidates = [action for action, value in allowed_estimates.items() if value == best_estimate]
+        return str(np.random.choice(candidates))
 
     def update(
         self,
@@ -109,6 +129,7 @@ class BanditAgent:
         self.state.total_reward += reward if actual_reward is None else actual_reward
         if trade_executed:
             self.state.trades += 1
+        self.state.steps_seen += 1
 
     def save(self) -> None:
         self.state.to_json(Path(config.STATE_PATH))
