@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -42,10 +42,15 @@ class DataFeed:
 
         self._cache_dir = Path(config.cache_dir)
 
+    @staticmethod
+    def _sanitize_component(value: str) -> str:
+        return "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in value)
+
     def _cache_key(self, window_end: str | None) -> str:
-        key_end = window_end or "latest"
-        safe_symbol = self.config.symbol.replace("/", "_")
-        return f"{safe_symbol}__{self.config.timeframe}__{self.config.limit}__{key_end}"
+        key_end = self._sanitize_component(window_end or "latest")
+        safe_symbol = self._sanitize_component(self.config.symbol.replace("/", "_"))
+        safe_timeframe = self._sanitize_component(self.config.timeframe)
+        return f"{safe_symbol}__{safe_timeframe}__{self.config.limit}__{key_end}"
 
     def _cache_paths(self, window_end: str | None) -> tuple[Path, Path]:
         base = self._cache_dir / self._cache_key(window_end)
@@ -98,7 +103,7 @@ class DataFeed:
                 last_ts = pd.to_datetime(frame.iloc[-1]["timestamp"]).isoformat()
             except Exception:
                 last_ts = None
-        window_end = self.config.window_end or last_ts or datetime.utcnow().isoformat()
+        window_end = self.config.window_end or last_ts or datetime.now(timezone.utc).isoformat()
         if self.config.cache:
             self._save_cache(frame, window_end, is_live)
         return frame, is_live

@@ -274,7 +274,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--symbol", default=config.DEFAULT_SYMBOL, help="Market pair to train on (e.g., BTC/USDT)")
     parser.add_argument("--timeframe", default=config.DEFAULT_TIMEFRAME, help="Candle timeframe (e.g., 1m, 5m, 1h)")
     parser.add_argument("--offline", action="store_true", help="Use synthetic candles instead of live exchange data")
-    parser.add_argument("--min-profit-threshold", type=float, default=0.0, help="Validation uplift over baseline (%) required")
+    parser.add_argument(
+        "--min-profit-threshold",
+        type=float,
+        default=0.0,
+        help="Validation uplift over baseline (percent) required",
+    )
     parser.add_argument("--max-drawdown", type=float, default=None, help="Maximum acceptable validation drawdown (fraction)")
     parser.add_argument("--max-trades", type=int, default=None, help="Optional cap on validation trades")
     parser.add_argument("--max-cycles", type=int, default=5, help="Maximum retraining attempts before giving up")
@@ -293,7 +298,7 @@ def main() -> None:
     args = parse_args()
     base_run_dir = Path(config.RUNS_DIR)
     base_run_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(datetime.UTC).strftime("%Y%m%d_%H%M%S")
     run_id = args.run_id or f"auto_{args.symbol.replace('/', '_')}_{args.timeframe}_{timestamp}"
     run_dir = base_run_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
