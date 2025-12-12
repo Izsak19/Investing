@@ -80,6 +80,62 @@ The code implements a lean version of the typical ML lifecycle:
 - The default **epsilon-greedy multi-armed bandit** is intentionally simple and stable for small datasets and short horizons.
 - You can experiment with contextual features (e.g., normalized indicators) to condition actions, or swap in a small policy-gradient model if you need more expressiveness.
 
+## Step-by-step model training strategy
+Follow this command-first recipe to train and iterate quickly.
+
+1. **Set up your environment** (once per machine)
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate   # Windows: .venv\\Scripts\\activate
+   pip install -r requirements.txt
+   ```
+
+2. **Smoke test offline loop** (fast functional check, no network)
+   ```bash
+   python main.py --offline --dashboard --duration 60
+   ```
+   - Confirms indicators, dashboard rendering, and logging to `data/` work end-to-end.
+
+3. **Warm up on the last 24h window** (profit-gated)  
+   Skip this if you only want synthetic data.
+   ```bash
+   python main.py --dashboard --warmup-hours 2 --warmup-profit-target 0.25 --continuous
+   ```
+   - Replays the last 24h until it reaches +0.25% profit or the warmup hours elapse, then rolls into live streaming.
+
+4. **Short live training cycle** (1–2h)  
+   Great for tuning hyperparameters such as `--epsilon` (exploration) and `--delay` (UI cadence).
+   ```bash
+   python main.py --dashboard --steps 120 --epsilon 0.1 --delay 1
+   ```
+
+5. **Extended live training** (half/whole day)  
+   Persist the agent state automatically in `data/state.json` so subsequent runs pick up where you left off.
+   ```bash
+   python main.py --dashboard --steps 720 --delay 1 --timeframe 1m
+   ```
+
+6. **Inspect learning artifacts**
+   ```bash
+   ls data/
+   head -n 20 data/trades.csv
+   cat data/state.json | python -m json.tool
+   ```
+   - Review trades for edge cases and verify Q-values are evolving sensibly.
+
+7. **Automated nightly retrain/backtest**  
+   Stops early if validation accuracy misses the target and restores the previous state.
+   ```bash
+   python auto_retrain.py --min-success-rate 60 --train-steps 500 --validate-steps 120
+   ```
+
+8. **Reset & rerun experiments**  
+   When you want a clean slate:
+   ```bash
+   rm -f data/state.json data/trades.csv
+   ```
+   - Then restart from step 2 with tweaked flags.
+
 ## Dashboard
 Enable `--dashboard` to see a live table that refreshes as the agent trains. It is text-only to minimize resource usage and works well inside PyCharm's Run window.
 
