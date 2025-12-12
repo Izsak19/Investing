@@ -22,9 +22,18 @@ class TradeEvent:
     close: float
     action: str
     reward: float
+    trainer_reward: float
+    mtm_delta: float
+    trade_impact: float
+    fee_paid: float
+    turnover_penalty: float
+    refilled: bool
+    refill_count: int
     portfolio_value: float
     cash: float
     position: float
+    executed_trades: int
+    sell_win_rate: float
 
 
 class WebDashboard:
@@ -95,6 +104,16 @@ class WebDashboard:
         position: float,
         success_rate: float,
         total_reward: float,
+        *,
+        trainer_reward: float,
+        mtm_delta: float,
+        trade_impact: float,
+        fee_paid: float,
+        turnover_penalty: float,
+        refilled: bool,
+        refill_count: int,
+        executed_trades: int,
+        sell_win_rate: float,
     ) -> None:
         ts_str = "" if timestamp is None else str(timestamp)
         with self._lock:
@@ -109,9 +128,18 @@ class WebDashboard:
                 close=float(ohlc.get("close", 0.0)),
                 action=action,
                 reward=float(reward),
+                trainer_reward=float(trainer_reward),
+                mtm_delta=float(mtm_delta),
+                trade_impact=float(trade_impact),
+                fee_paid=float(fee_paid),
+                turnover_penalty=float(turnover_penalty),
+                refilled=bool(refilled),
+                refill_count=int(refill_count),
                 portfolio_value=float(portfolio_value),
                 cash=float(cash),
                 position=float(position),
+                executed_trades=int(executed_trades),
+                sell_win_rate=float(sell_win_rate),
             )
             self._events.append(event)
             self._latest_metrics = {
@@ -120,6 +148,15 @@ class WebDashboard:
                 "portfolio_value": float(portfolio_value),
                 "cash": float(cash),
                 "position": float(position),
+                "trainer_reward": float(trainer_reward),
+                "mtm_delta": float(mtm_delta),
+                "trade_impact": float(trade_impact),
+                "fee_paid": float(fee_paid),
+                "turnover_penalty": float(turnover_penalty),
+                "refilled": bool(refilled),
+                "refill_count": int(refill_count),
+                "executed_trades": int(executed_trades),
+                "sell_win_rate": float(sell_win_rate),
             }
 
     @property

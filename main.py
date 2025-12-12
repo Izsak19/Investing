@@ -12,7 +12,7 @@ from src.agent import BanditAgent
 from src.data_feed import DataFeed, MarketConfig
 from src.indicators import compute_indicators
 from src.dashboard import live_dashboard
-from src.trainer import Trainer
+from src.trainer import StepResult, Trainer
 from src.webapp import WebDashboard
 
 
@@ -44,7 +44,7 @@ def parse_args() -> argparse.Namespace:
 
 def run_loop(
     trainer: Trainer, frame: pd.DataFrame, steps: int, duration: float | None, delay: float
-) -> Iterable[tuple[int, pd.Series, str, float]]:
+) -> Iterable[tuple[int, pd.Series, StepResult, float, float, float]]:
     """
     Generate trading events either for a fixed number of steps or until a duration elapses.
 
@@ -58,6 +58,9 @@ def run_loop(
     if row_count == 0:
         return
 
+    first_price = float(frame.iloc[0]["close"])
+    pv_prev_after = trainer.portfolio.value(first_price)
+
     while True:
         if duration is None and idx >= steps:
             break
@@ -68,10 +71,12 @@ def run_loop(
         price = float(row["close"])
 
         before_trade_value = trainer.portfolio.value(price)
-        trainer.step(row, idx)
+        result = trainer.step(row, idx)
         after_trade_value = trainer.portfolio.value(price)
-        delta = after_trade_value - before_trade_value
-        yield idx, row, trainer.history[-1][1], delta
+        trade_impact = after_trade_value - before_trade_value
+        mtm_delta = after_trade_value - pv_prev_after
+        pv_prev_after = after_trade_value
+        yield idx, row, result, after_trade_value, mtm_delta, trade_impact
 
         idx += 1
         if delay > 0:
@@ -80,11 +85,12 @@ def run_loop(
 
 def stream_live(
     trainer: Trainer, feed: DataFeed, delay: float
-) -> Iterable[tuple[int, pd.Series, str, float]]:
+) -> Iterable[tuple[int, pd.Series, StepResult, float, float, float]]:
     """Continuously fetch new market data and yield trading events indefinitely."""
 
     last_ts = None
     idx = 0
+    pv_prev_after = trainer.portfolio.value(0.0)
 
     while True:
         frame = compute_indicators(feed.fetch())
@@ -100,11 +106,13 @@ def stream_live(
 
             price = float(row["close"])
             before_trade_value = trainer.portfolio.value(price)
-            trainer.step(row, idx)
+            result = trainer.step(row, idx)
             after_trade_value = trainer.portfolio.value(price)
-            delta = after_trade_value - before_trade_value
+            trade_impact = after_trade_value - before_trade_value
+            mtm_delta = after_trade_value - pv_prev_after
+            pv_prev_after = after_trade_value
 
-            yield idx, row, trainer.history[-1][1], delta
+            yield idx, row, result, after_trade_value, mtm_delta, trade_impact
 
             idx += 1
             last_ts = ts if ts is not None else last_ts
@@ -158,7 +166,7 @@ def main() -> None:
             from src.dashboard import live_dashboard as render
 
             def enrich(events):
-                for step, row, action, reward in events:
+                for step, row, result, portfolio_value, mtm_delta, trade_impact in events:
                     price = float(row["close"])
                     if web_dashboard:
                         web_dashboard.publish_event(
@@ -170,21 +178,42 @@ def main() -> None:
                                 "low": float(row.get("low", price)),
                                 "close": price,
                             },
-                            action=action,
-                            reward=reward,
-                            portfolio_value=trainer.portfolio.value(price),
+                            action=result.action,
+                            reward=result.trainer_reward,
+                            portfolio_value=portfolio_value,
                             cash=trainer.portfolio.cash,
                             position=trainer.portfolio.position,
                             success_rate=trainer.success_rate,
                             total_reward=trainer.agent.state.total_reward,
+                            trainer_reward=result.trainer_reward,
+                            mtm_delta=mtm_delta,
+                            trade_impact=trade_impact,
+                            fee_paid=result.fee_paid,
+                            turnover_penalty=result.turnover_penalty,
+                            refilled=result.refilled,
+                            refill_count=trainer.refill_count,
+                            executed_trades=trainer.agent.state.trades,
+                            sell_win_rate=trainer.trade_win_rate,
                         )
-                    yield step, price, action, reward, trainer.portfolio, agent, trainer.success_rate
+                    yield (
+                        step,
+                        price,
+                        result,
+                        portfolio_value,
+                        mtm_delta,
+                        trade_impact,
+                        trainer.portfolio,
+                        agent,
+                        trainer.success_rate,
+                        trainer.refill_count,
+                        trainer.trade_win_rate,
+                    )
 
             render(enrich(loop))
         else:
 
             def emit(events):
-                for step, row, action, reward in events:
+                for step, row, result, portfolio_value, mtm_delta, trade_impact in events:
                     price = float(row["close"])
                     if web_dashboard:
                         web_dashboard.publish_event(
@@ -196,13 +225,22 @@ def main() -> None:
                                 "low": float(row.get("low", price)),
                                 "close": price,
                             },
-                            action=action,
-                            reward=reward,
-                            portfolio_value=trainer.portfolio.value(price),
+                            action=result.action,
+                            reward=result.trainer_reward,
+                            portfolio_value=portfolio_value,
                             cash=trainer.portfolio.cash,
                             position=trainer.portfolio.position,
                             success_rate=trainer.success_rate,
                             total_reward=trainer.agent.state.total_reward,
+                            trainer_reward=result.trainer_reward,
+                            mtm_delta=mtm_delta,
+                            trade_impact=trade_impact,
+                            fee_paid=result.fee_paid,
+                            turnover_penalty=result.turnover_penalty,
+                            refilled=result.refilled,
+                            refill_count=trainer.refill_count,
+                            executed_trades=trainer.agent.state.trades,
+                            sell_win_rate=trainer.trade_win_rate,
                         )
                     yield
 

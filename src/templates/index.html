@@ -78,6 +78,42 @@
           <h3>Total Reward</h3>
           <span id="totalReward">--</span>
         </div>
+        <div class="metric">
+          <h3>Trainer Reward (Step)</h3>
+          <span id="trainerReward">--</span>
+        </div>
+        <div class="metric">
+          <h3>Portfolio Δ (MTM)</h3>
+          <span id="mtmDelta">--</span>
+        </div>
+        <div class="metric">
+          <h3>Trade Impact</h3>
+          <span id="tradeImpact">--</span>
+        </div>
+        <div class="metric">
+          <h3>Fee Paid</h3>
+          <span id="feePaid">--</span>
+        </div>
+        <div class="metric">
+          <h3>Turnover Penalty</h3>
+          <span id="turnoverPenalty">--</span>
+        </div>
+        <div class="metric">
+          <h3>Refilled</h3>
+          <span id="refilled">--</span>
+        </div>
+        <div class="metric">
+          <h3>Refill Count</h3>
+          <span id="refillCount">--</span>
+        </div>
+        <div class="metric">
+          <h3>Executed Trades</h3>
+          <span id="executedTrades">--</span>
+        </div>
+        <div class="metric">
+          <h3>Sell Win Rate</h3>
+          <span id="sellWinRate">--</span>
+        </div>
       </section>
     </main>
     <script>
@@ -123,6 +159,15 @@
         document.getElementById("positionValue").textContent = (metrics.position || 0).toFixed(6);
         document.getElementById("successRate").textContent = `${(metrics.success_rate || 0).toFixed(2)}%`;
         document.getElementById("totalReward").textContent = (metrics.total_reward || 0).toFixed(2);
+        document.getElementById("trainerReward").textContent = (metrics.trainer_reward || 0).toFixed(4);
+        document.getElementById("mtmDelta").textContent = (metrics.mtm_delta || 0).toFixed(4);
+        document.getElementById("tradeImpact").textContent = (metrics.trade_impact || 0).toFixed(4);
+        document.getElementById("feePaid").textContent = (metrics.fee_paid || 0).toFixed(4);
+        document.getElementById("turnoverPenalty").textContent = (metrics.turnover_penalty || 0).toFixed(4);
+        document.getElementById("refilled").textContent = metrics.refilled ? "Yes" : "No";
+        document.getElementById("refillCount").textContent = metrics.refill_count ?? 0;
+        document.getElementById("executedTrades").textContent = metrics.executed_trades ?? 0;
+        document.getElementById("sellWinRate").textContent = `${((metrics.sell_win_rate || 0) * 100).toFixed(2)}%`;
       }
 
       function updateChart(events) {
