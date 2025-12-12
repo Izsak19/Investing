@@ -12,7 +12,6 @@ import pandas as pd
 from src import config
 from src.agent import BanditAgent
 from src.data_feed import DataFeed, MarketConfig
-from src.indicators import compute_indicators
 from src.dashboard import live_dashboard
 from src.trainer import StepResult, Trainer, resume_from
 from src.webapp import WebDashboard
@@ -44,6 +43,9 @@ def parse_args() -> argparse.Namespace:
         help="pause (seconds) between trading events to make learning visible",
     )
     parser.add_argument("--offline", action="store_true", help="use synthetic data instead of live exchange")
+    parser.add_argument("--cache", action="store_true", help="cache fetched datasets for reproducibility")
+    parser.add_argument("--cache-only", action="store_true", help="load data exclusively from the cache")
+    parser.add_argument("--cache-dir", type=Path, default=Path("data/cache"), help="dataset cache directory")
     parser.add_argument("--dashboard", action="store_true", help="enable live dashboard rendering")
     parser.add_argument("--web-dashboard", action="store_true", help="serve a Plotly HTML dashboard on port 8000")
     parser.add_argument("--web-port", type=int, default=8000, help="port for the web dashboard")
@@ -90,6 +92,7 @@ def run_loop(
     checkpoint_every: int,
     flush_trades_every: int,
     keep_last: int,
+    data_is_live: bool = False,
     train: bool = True,
     epsilon_override: float | None = None,
 ) -> Iterable[tuple[int, pd.Series, StepResult, float, float, float]]:
@@ -101,6 +104,7 @@ def run_loop(
     """
 
     start = time.monotonic()
+    trainer.last_data_is_live = data_is_live
     idx = 0
     row_count = len(frame)
     if row_count < 2:
@@ -138,7 +142,7 @@ def run_loop(
 
         if train:
             if flush_trades_every > 0 and trainer.steps % flush_trades_every == 0:
-                trainer._flush_trades_and_metrics(run_dir)
+                trainer._flush_trades_and_metrics(run_dir, data_is_live=data_is_live)
             if checkpoint_every > 0 and trainer.steps % checkpoint_every == 0:
                 trainer.agent.save(run_dir=run_dir, checkpoint=True, keep_last=keep_last)
                 trainer._save_trainer_state(run_dir, run_id, checkpoint=True, keep_last=keep_last)
@@ -165,10 +169,12 @@ def stream_live(
     last_ts = None
     idx = 0
     pv_prev_after = trainer.portfolio.value(0.0)
+    trainer.last_data_is_live = None
 
     while True:
-        raw_frame, _ = feed.fetch()
-        frame = compute_indicators(raw_frame)
+        raw_frame, is_live = feed.fetch(include_indicators=True)
+        trainer.last_data_is_live = is_live
+        frame = raw_frame
         if frame.empty:
             if delay > 0:
                 time.sleep(delay)
@@ -190,7 +196,7 @@ def stream_live(
             pv_prev_after = after_trade_value
 
             if flush_trades_every > 0 and trainer.steps % flush_trades_every == 0:
-                trainer._flush_trades_and_metrics(run_dir)
+                trainer._flush_trades_and_metrics(run_dir, data_is_live=is_live)
             if checkpoint_every > 0 and trainer.steps % checkpoint_every == 0:
                 trainer.agent.save(run_dir=run_dir, checkpoint=True, keep_last=keep_last)
                 trainer._save_trainer_state(run_dir, run_id, checkpoint=True, keep_last=keep_last)
@@ -253,7 +259,15 @@ def main() -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
 
     feed = DataFeed(
-        MarketConfig(symbol=args.symbol, timeframe=args.timeframe, limit=limit, offline=args.offline)
+        MarketConfig(
+            symbol=args.symbol,
+            timeframe=args.timeframe,
+            limit=limit,
+            offline=args.offline,
+            cache=args.cache,
+            cache_only=args.cache_only,
+            cache_dir=args.cache_dir,
+        )
     )
 
     agent = BanditAgent(
@@ -273,8 +287,7 @@ def main() -> None:
         web_dashboard.start()
 
     if args.continuous:
-        raw_frame, _ = feed.fetch()
-        feature_frame = compute_indicators(raw_frame)
+        feature_frame, is_live = feed.fetch(include_indicators=True)
 
         warmup_target = trainer.initial_cash * (1 + args.warmup_profit_target / 100)
         warmup_seconds = args.warmup_hours * 3600
@@ -297,6 +310,7 @@ def main() -> None:
                     checkpoint_every=args.checkpoint_every,
                     flush_trades_every=args.flush_trades_every,
                     keep_last=args.keep_last,
+                    data_is_live=is_live,
                 ):
                     yield event
                     _, _, _, portfolio_value, _, _ = event
@@ -329,8 +343,7 @@ def main() -> None:
 
         loop = warmup_then_stream()
     else:
-        raw_frame, _ = feed.fetch()
-        feature_frame = compute_indicators(raw_frame)
+        feature_frame, is_live = feed.fetch(include_indicators=True)
         loop_checkpoint_every = 0 if eval_mode else args.checkpoint_every
         loop_flush_every = 0 if eval_mode else args.flush_trades_every
         loop = run_loop(
@@ -344,6 +357,7 @@ def main() -> None:
             checkpoint_every=loop_checkpoint_every,
             flush_trades_every=loop_flush_every,
             keep_last=args.keep_last,
+            data_is_live=is_live,
             train=not eval_mode,
             epsilon_override=0.0 if eval_mode else None,
         )
@@ -395,6 +409,7 @@ def main() -> None:
                             executed_trades=trainer.agent.state.trades,
                             sell_win_rate=trainer.trade_win_rate,
                             realized_pnl=result.realized_pnl,
+                            data_is_live=trainer.last_data_is_live or False,
                         )
                     yield (
                         step,
@@ -444,6 +459,7 @@ def main() -> None:
                             executed_trades=trainer.agent.state.trades,
                             sell_win_rate=trainer.trade_win_rate,
                             realized_pnl=result.realized_pnl,
+                            data_is_live=trainer.last_data_is_live or False,
                         )
                     yield
 
@@ -453,7 +469,7 @@ def main() -> None:
         print("Interrupted; saving agent state before exit...")
     finally:
         if not eval_mode:
-            trainer._flush_trades_and_metrics(run_dir, force=True)
+            trainer._flush_trades_and_metrics(run_dir, force=True, data_is_live=trainer.last_data_is_live)
             trainer.agent.save(run_dir=run_dir, keep_last=args.keep_last)
             trainer._save_trainer_state(run_dir, run_id, checkpoint=False, keep_last=args.keep_last)
 

@@ -139,6 +139,7 @@ class Trainer:
         self._last_value: float | None = None
         self.last_trade_step = -1
         self.last_entry_step = -1
+        self.last_data_is_live: bool | None = None
 
     def reset_portfolio(self) -> None:
         self.portfolio.cash = self.initial_cash
@@ -362,10 +363,12 @@ class Trainer:
         checkpoint_every: int,
         flush_trades_every: int,
         keep_last: int,
+        data_is_live: bool | None = None,
     ) -> None:
         steps = max_steps if max_steps is not None else len(frame)
         effective_steps = min(steps, max(0, len(frame) - 1))
         interrupted = False
+        self.last_data_is_live = data_is_live
         try:
             for offset in range(effective_steps):
                 row = frame.iloc[offset]
@@ -373,18 +376,28 @@ class Trainer:
                 self.step(row, next_row, frame.index[offset])
 
                 if flush_trades_every > 0 and self.steps % flush_trades_every == 0:
-                    self._flush_trades_and_metrics(run_dir)
+                    self._flush_trades_and_metrics(run_dir, data_is_live=data_is_live)
                 if checkpoint_every > 0 and self.steps % checkpoint_every == 0:
                     self.agent.save(run_dir=run_dir, checkpoint=True, keep_last=keep_last)
                     self._save_trainer_state(run_dir, run_id, checkpoint=True, keep_last=keep_last)
         except KeyboardInterrupt:
             interrupted = True
         finally:
-            self._flush_trades_and_metrics(run_dir, force=True)
+            self._flush_trades_and_metrics(run_dir, force=True, data_is_live=data_is_live)
             self.agent.save(run_dir=run_dir, checkpoint=False, keep_last=keep_last)
             self._save_trainer_state(run_dir, run_id, checkpoint=not interrupted, keep_last=keep_last)
 
-    def _flush_trades_and_metrics(self, run_dir: Path, force: bool = False) -> None:
+    def _flush_trades_and_metrics(
+        self,
+        run_dir: Path,
+        force: bool = False,
+        *,
+        data_is_live: bool | None = None,
+        baseline_final_value: float | None = None,
+        val_final_value: float | None = None,
+        max_drawdown: float | None = None,
+        executed_trades: int | None = None,
+    ) -> None:
         pending = self.history[self._last_flushed_trade_idx :]
         if pending:
             self._persist_trades(run_dir, pending)
@@ -393,7 +406,14 @@ class Trainer:
                 self.history = []
                 self._last_flushed_trade_idx = 0
         if force or pending:
-            self._persist_metrics(run_dir)
+            self._persist_metrics(
+                run_dir,
+                data_is_live=data_is_live,
+                baseline_final_value=baseline_final_value,
+                val_final_value=val_final_value,
+                max_drawdown=max_drawdown,
+                executed_trades=executed_trades,
+            )
 
     def _persist_trades(self, run_dir: Path, rows: list[tuple[int, str, float, float]]) -> None:
         path = run_dir / "trades.csv"
@@ -406,7 +426,16 @@ class Trainer:
             for row in rows:
                 writer.writerow(row)
 
-    def _persist_metrics(self, run_dir: Path) -> None:
+    def _persist_metrics(
+        self,
+        run_dir: Path,
+        *,
+        data_is_live: bool | None = None,
+        baseline_final_value: float | None = None,
+        val_final_value: float | None = None,
+        max_drawdown: float | None = None,
+        executed_trades: int | None = None,
+    ) -> None:
         path = run_dir / "metrics.csv"
         path.parent.mkdir(parents=True, exist_ok=True)
         write_header = not path.exists()
@@ -429,6 +458,11 @@ class Trainer:
                         "refill_count",
                         "total_fee_paid",
                         "total_turnover_penalty_paid",
+                        "data_is_live",
+                        "baseline_final_value",
+                        "val_final_value",
+                        "max_drawdown",
+                        "executed_trades",
                     ]
                 )
             writer.writerow(
@@ -445,6 +479,11 @@ class Trainer:
                     self.refill_count,
                     self.total_fee_paid,
                     self.total_turnover_penalty_paid,
+                    data_is_live if data_is_live is not None else self.last_data_is_live,
+                    baseline_final_value,
+                    val_final_value,
+                    max_drawdown,
+                    executed_trades,
                 ]
             )
 
