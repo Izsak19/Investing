@@ -16,5 +16,12 @@ ALPHA = 0.2  # learning rate
 GAMMA = 0.0  # no discounting for one-step reward
 EPSILON = 0.1  # exploration probability
 
+# Numerical stability safeguards
+# Caps for feature values and weights to prevent floating-point overflow when
+# running long training sessions with large price-denominated indicators.
+FEATURE_CLIP = 1e6
+WEIGHT_CLIP = 1e6
+ERROR_CLIP = 1e6
+
 # Dashboard refresh rate in seconds
 DASHBOARD_REFRESH = 1.0
