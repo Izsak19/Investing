@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+from collections import Counter, deque
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +15,7 @@ import pandas as pd
 from src.agent import AgentState, BanditAgent
 from src import config
 from src.indicators import INDICATOR_COLUMNS
+from src.metrics import compute_max_drawdown, compute_sharpe_ratio, rolling_volatility, total_return
 from src.persistence import atomic_write_json
 
 
@@ -140,6 +142,10 @@ class Trainer:
         self.last_trade_step = -1
         self.last_entry_step = -1
         self.last_data_is_live: bool | None = None
+        self._equity_curve: list[float] = []
+        self._return_history: deque[float] = deque(maxlen=config.RISK_VOL_WINDOW)
+        self._recent_actions: deque[str] = deque(maxlen=config.ACTION_HISTORY_WINDOW)
+        self._action_counter: Counter[str] = Counter()
 
     def reset_portfolio(self) -> None:
         self.portfolio.cash = self.initial_cash
@@ -148,6 +154,8 @@ class Trainer:
         self.portfolio.entry_value = 0.0
         self.last_trade_step = -1
         self.last_entry_step = -1
+        self._equity_curve.clear()
+        self._return_history.clear()
 
     def export_state(self, run_id: str) -> TrainerState:
         return TrainerState(
@@ -192,6 +200,15 @@ class Trainer:
 
     def _build_features(self, row: pd.Series) -> np.ndarray:
         return build_features(row, self.portfolio)
+
+    def _log_action(self, action: str) -> None:
+        if len(self._recent_actions) == self._recent_actions.maxlen:
+            oldest = self._recent_actions[0]
+            self._action_counter[oldest] -= 1
+            if self._action_counter[oldest] <= 0:
+                del self._action_counter[oldest]
+        self._recent_actions.append(action)
+        self._action_counter[action] += 1
 
     def step(
         self,
@@ -275,11 +292,16 @@ class Trainer:
             self.last_entry_step = -1
 
         value_next = self.portfolio.value(price_next)
+        self._log_action(action)
         reward = value_next - value_before
+        step_return = reward / max(value_before, 1e-6)
+        self._return_history.append(step_return)
+        vol_penalty = rolling_volatility(self._return_history) * config.RISK_VOL_PENALTY
+        risk_penalty_value = vol_penalty * self.initial_cash
+        trainer_reward = reward - risk_penalty_value
 
-        # Normalize reward by account value so updates reflect percentage returns
-        # and stay bounded during long runs.
-        pct = reward / max(abs(value_before), 1e-6)
+        # Normalize reward by initial capital to avoid runaway scales on long episodes.
+        pct = trainer_reward / max(self.initial_cash, 1e-6)
         scaled_reward = math.tanh(pct * config.REWARD_SCALE)
         next_features = self._build_features(next_row)
         next_allowed_actions = ["hold"]
@@ -297,13 +319,14 @@ class Trainer:
                 next_features=next_features,
                 allowed_next=next_allowed_actions,
             )
-        self.history.append((step_idx, action, price_now, reward))
+            self.history.append((step_idx, action, price_now, reward))
         self.total_steps += 1
-        if reward > 0:
+        if trainer_reward > 0:
             self.positive_steps += 1
         self.steps += 1
         self.total_fee_paid += fee_paid
         self.total_turnover_penalty_paid += turnover_penalty
+        self._equity_curve.append(value_next)
         if action == "sell" and trade_executed:
             self.sell_trades += 1
             if realized_pnl > 0:
@@ -314,7 +337,7 @@ class Trainer:
 
         return StepResult(
             action=action,
-            trainer_reward=reward,
+            trainer_reward=trainer_reward,
             scaled_reward=scaled_reward,
             trade_executed=trade_executed,
             fee_paid=fee_paid,
@@ -358,6 +381,26 @@ class Trainer:
     @property
     def trade_win_rate(self) -> float:
         return self.winning_sells / max(1, self.sell_trades)
+
+    @property
+    def action_distribution(self) -> dict[str, float]:
+        total = sum(self._action_counter.values())
+        if total <= 0:
+            return {}
+        return {action: count / total for action, count in self._action_counter.items()}
+
+    @property
+    def sharpe_ratio(self) -> float:
+        return compute_sharpe_ratio(list(self._return_history))
+
+    @property
+    def max_drawdown(self) -> float:
+        return compute_max_drawdown(self._equity_curve)
+
+    @property
+    def total_return(self) -> float:
+        price = self._last_price if self._last_price is not None else 0.0
+        return total_return(self.initial_cash, self.portfolio.value(price))
 
     def run(
         self,
@@ -403,6 +446,7 @@ class Trainer:
         val_final_value: float | None = None,
         max_drawdown: float | None = None,
         executed_trades: int | None = None,
+        ma_baseline_final_value: float | None = None,
     ) -> None:
         pending = self.history[self._last_flushed_trade_idx :]
         if pending:
@@ -419,6 +463,7 @@ class Trainer:
                 val_final_value=val_final_value,
                 max_drawdown=max_drawdown,
                 executed_trades=executed_trades,
+                ma_baseline_final_value=ma_baseline_final_value,
             )
 
     def _persist_trades(self, run_dir: Path, rows: list[tuple[int, str, float, float]]) -> None:
@@ -441,12 +486,17 @@ class Trainer:
         val_final_value: float | None = None,
         max_drawdown: float | None = None,
         executed_trades: int | None = None,
+        ma_baseline_final_value: float | None = None,
     ) -> None:
         path = run_dir / "metrics.csv"
         path.parent.mkdir(parents=True, exist_ok=True)
         write_header = not path.exists()
         price = self._last_price if self._last_price is not None else 0.0
         portfolio_value = self.portfolio.value(price)
+        total_ret = total_return(self.initial_cash, portfolio_value)
+        realized_max_drawdown = max_drawdown if max_drawdown is not None else compute_max_drawdown(self._equity_curve)
+        sharpe = compute_sharpe_ratio(list(self._return_history))
+        distribution = self.action_distribution
         with path.open("a", newline="") as f:
             writer = csv.writer(f)
             if write_header:
@@ -469,6 +519,12 @@ class Trainer:
                         "val_final_value",
                         "max_drawdown",
                         "executed_trades",
+                        "ma_baseline_final_value",
+                        "total_return",
+                        "sharpe_ratio",
+                        "action_hold",
+                        "action_buy",
+                        "action_sell",
                     ]
                 )
             writer.writerow(
@@ -488,8 +544,14 @@ class Trainer:
                     data_is_live if data_is_live is not None else self.last_data_is_live,
                     baseline_final_value,
                     val_final_value,
-                    max_drawdown,
+                    realized_max_drawdown,
                     executed_trades,
+                    ma_baseline_final_value,
+                    total_ret,
+                    sharpe,
+                    distribution.get("hold", 0.0),
+                    distribution.get("buy", 0.0),
+                    distribution.get("sell", 0.0),
                 ]
             )
 
