@@ -124,6 +124,26 @@ class Trainer:
         self.timeframe = timeframe or agent.state.timeframe or config.DEFAULT_TIMEFRAME
         self.periods_per_year = periods_per_year(self.timeframe)
 
+    def reset_portfolio(self) -> None:
+        """Reset portfolio and tracking buffers to their initial state."""
+        self.portfolio = Portfolio(cash=self.initial_cash)
+        self.history.clear()
+        self._last_flushed_trade_idx = 0
+        self._last_price = None
+        self._last_value = None
+        self._equity_curve.clear()
+        self._return_history.clear()
+        self._recent_actions.clear()
+        self._action_counter.clear()
+        self._turnover_window.clear()
+        self.steps = 0
+        self.total_steps = 0
+        self.positive_steps = 0
+        self.total_fee_paid = 0.0
+        self.total_turnover_penalty_paid = 0.0
+        self.sell_trades = 0
+        self.winning_sells = 0
+
     # --- helpers --------------------------------------------------------------
 
     def _log_action(self, action: str) -> None:
@@ -381,4 +401,222 @@ class Trainer:
 
     # NOTE: run(), _flush_trades_and_metrics(), _persist_trades(), _persist_metrics(), _save_trainer_state()
     # remain identical to your current version.
+
+    # --- persistence ---------------------------------------------------------
+
+    def _persist_trades(self, run_dir: Path, data_is_live: bool | None = None) -> None:
+        path = run_dir / "trades.csv"
+        new_trades = self.history[self._last_flushed_trade_idx :]
+        if not new_trades:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        header = ["step", "action", "price", "reward", "data_is_live"]
+        write_header = not path.exists()
+        with path.open("a", newline="") as f:
+            writer = csv.writer(f)
+            if write_header:
+                writer.writerow(header)
+            for step_idx, action, price, reward in new_trades:
+                writer.writerow([step_idx, action, price, reward, data_is_live])
+
+    def _persist_metrics(
+        self,
+        run_dir: Path,
+        *,
+        data_is_live: bool | None = None,
+        baseline_final_value: float | None = None,
+        val_final_value: float | None = None,
+        max_drawdown: float | None = None,
+        executed_trades: int | None = None,
+        ma_baseline_final_value: float | None = None,
+    ) -> None:
+        metrics = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "total_steps": self.total_steps,
+            "success_rate": self.success_rate,
+            "trade_win_rate": self.trade_win_rate,
+            "sharpe_ratio": self.sharpe_ratio,
+            "max_drawdown": max_drawdown if max_drawdown is not None else self.max_drawdown,
+            "total_return": self.total_return,
+            "total_fee_paid": self.total_fee_paid,
+            "turnover_penalty_paid": self.total_turnover_penalty_paid,
+            "data_is_live": data_is_live,
+            "baseline_final_value": baseline_final_value,
+            "val_final_value": val_final_value,
+            "ma_baseline_final_value": ma_baseline_final_value,
+            "executed_trades": executed_trades if executed_trades is not None else len(self.history),
+        }
+        path = run_dir / "metrics.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing: list[dict] = []
+        if path.exists():
+            try:
+                existing = json.loads(path.read_text())
+            except json.JSONDecodeError:
+                existing = []
+        existing.append(metrics)
+        atomic_write_json(path, existing)
+
+    def _save_trainer_state(
+        self,
+        run_dir: Path,
+        run_id: str,
+        *,
+        checkpoint: bool = False,
+        keep_last: int = 5,
+    ) -> Path:
+        state = TrainerState(
+            run_id=run_id,
+            steps=self.steps,
+            prev_price=self._last_price,
+            prev_value=self._last_value,
+            refill_count=self.refill_count,
+            total_fee_paid=self.total_fee_paid,
+            total_turnover_penalty_paid=self.total_turnover_penalty_paid,
+            total_trades=len(self.history),
+            successful_trades=self.winning_sells,
+            sell_trades=self.sell_trades,
+            winning_sells=self.winning_sells,
+            portfolio_cash=self.portfolio.cash,
+            portfolio_position=self.portfolio.position,
+            portfolio_entry_price=self.portfolio.entry_price,
+            portfolio_entry_value=self.portfolio.entry_value,
+            total_steps=self.total_steps,
+            positive_steps=self.positive_steps,
+            last_trade_step=self.last_trade_step,
+            last_entry_step=self.last_entry_step,
+        )
+
+        target_dir = Path(run_dir)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        latest = target_dir / "trainer_state_latest.json"
+        state.to_json(latest)
+
+        saved = latest
+        if checkpoint:
+            ck = target_dir / f"trainer_state_step_{self.steps}.json"
+            state.to_json(ck)
+            ckpts = sorted(
+                [p for p in target_dir.glob("trainer_state_step_*.json")],
+                key=lambda p: int(p.stem.split("_")[-1]),
+            )
+            keep_last = max(0, keep_last)
+            for old in ckpts[:-keep_last]:
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+            saved = ck
+        return saved
+
+    def _flush_trades_and_metrics(
+        self,
+        run_dir: Path,
+        *,
+        force: bool = False,
+        data_is_live: bool | None = None,
+        baseline_final_value: float | None = None,
+        val_final_value: float | None = None,
+        max_drawdown: float | None = None,
+        executed_trades: int | None = None,
+        ma_baseline_final_value: float | None = None,
+    ) -> None:
+        new_trades = self.history[self._last_flushed_trade_idx :]
+        if new_trades or force:
+            self._persist_trades(run_dir, data_is_live=data_is_live)
+            self._persist_metrics(
+                run_dir,
+                data_is_live=data_is_live,
+                baseline_final_value=baseline_final_value,
+                val_final_value=val_final_value,
+                max_drawdown=max_drawdown,
+                executed_trades=executed_trades,
+                ma_baseline_final_value=ma_baseline_final_value,
+            )
+            self._last_flushed_trade_idx = len(self.history)
+
+    # --- execution ------------------------------------------------------------
+
+    def run(
+        self,
+        frame: pd.DataFrame,
+        *,
+        max_steps: int | None = None,
+        run_id: str,
+        run_dir: Path,
+        checkpoint_every: int,
+        flush_trades_every: int,
+        keep_last: int,
+        data_is_live: bool = False,
+    ) -> None:
+        if frame.empty:
+            return
+
+        limit = max_steps if max_steps is not None else len(frame) - 1
+        limit = min(limit, len(frame) - 1)
+
+        self.last_data_is_live = data_is_live
+        first_price = float(frame.iloc[0]["close"])
+        pv_prev_after = self.portfolio.value(first_price)
+
+        for idx in range(limit):
+            row = frame.iloc[idx]
+            next_row = frame.iloc[idx + 1]
+            price = float(row["close"])
+            before_trade_value = self.portfolio.value(price)
+            result = self.step(row, next_row, idx, train=True)
+            after_trade_value = self.portfolio.value(price)
+            trade_impact = after_trade_value - before_trade_value
+            mtm_delta = after_trade_value - pv_prev_after
+            pv_prev_after = after_trade_value
+
+            if flush_trades_every > 0 and self.steps % flush_trades_every == 0:
+                self._flush_trades_and_metrics(run_dir, data_is_live=data_is_live)
+            if checkpoint_every > 0 and self.steps % checkpoint_every == 0:
+                self.agent.save(run_dir=run_dir, checkpoint=True, keep_last=keep_last)
+                self._save_trainer_state(run_dir, run_id, checkpoint=True, keep_last=keep_last)
+
+            # track last trade timing
+            if result.trade_executed:
+                self.last_trade_step = idx
+                if result.action == "buy":
+                    self.last_entry_step = idx
+
+            # simple return history update
+            if mtm_delta != 0:
+                pnl = mtm_delta - result.fee_paid - result.turnover_penalty
+                base = max(before_trade_value, 1e-6)
+                self._return_history.append(pnl / base)
+
+    # --- restore helpers ------------------------------------------------------
+
+
+def resume_from(run_dir: Path, agent: BanditAgent, trainer: Trainer) -> None:
+    """Restore agent and trainer state from a previous run directory."""
+
+    agent_state_path = Path(run_dir) / "agent_state_latest.json"
+    if agent_state_path.exists():
+        agent.state = AgentState.from_json(agent_state_path)
+        agent._prepare_state()
+
+    trainer_state_path = Path(run_dir) / "trainer_state_latest.json"
+    if trainer_state_path.exists():
+        state = TrainerState.from_json(trainer_state_path)
+        trainer.steps = state.steps
+        trainer.total_steps = state.total_steps
+        trainer.positive_steps = state.positive_steps
+        trainer.refill_count = state.refill_count
+        trainer.total_fee_paid = state.total_fee_paid
+        trainer.total_turnover_penalty_paid = state.total_turnover_penalty_paid
+        trainer.sell_trades = state.sell_trades
+        trainer.winning_sells = state.winning_sells
+        trainer.last_trade_step = state.last_trade_step
+        trainer.last_entry_step = state.last_entry_step
+        trainer.portfolio.cash = state.portfolio_cash
+        trainer.portfolio.position = state.portfolio_position
+        trainer.portfolio.entry_price = state.portfolio_entry_price
+        trainer.portfolio.entry_value = state.portfolio_entry_value
+        trainer._last_price = state.prev_price
+        trainer._last_value = state.prev_value
+
 
