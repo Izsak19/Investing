@@ -112,6 +112,16 @@ class BanditAgent:
     def _clip_weights(self, weights: list[list[float]]) -> list[list[float]]:
         return np.clip(np.asarray(weights, dtype=float), -config.WEIGHT_CLIP, config.WEIGHT_CLIP).tolist()
 
+    def _project_precision(self, matrix: np.ndarray) -> np.ndarray:
+        """Symmetrize and floor eigenvalues to keep precision matrices well-behaved."""
+
+        sym = 0.5 * (matrix + matrix.T)
+        eigvals, eigvecs = np.linalg.eigh(sym)
+        floor = 1e-9
+        clipped = np.clip(eigvals, floor, None)
+        projected = eigvecs @ np.diag(clipped) @ eigvecs.T
+        return 0.5 * (projected + projected.T)
+
     def _ensure_covariance_shape(self) -> None:
         identity_scale = self.state.ridge_factor if self.state.ridge_factor > 0 else 1.0
         base = np.eye(self._feature_size, dtype=float) / identity_scale
@@ -122,6 +132,9 @@ class BanditAgent:
             mat = np.asarray(self.state.cov_inv_matrices[i], dtype=float)
             if mat.shape != (self._feature_size, self._feature_size):
                 self.state.cov_inv_matrices[i] = base.tolist()
+                continue
+            projected = self._project_precision(mat)
+            self.state.cov_inv_matrices[i] = projected.tolist()
 
     def _ensure_bias_shape(self) -> None:
         if len(self.state.bias_vectors) != len(ACTIONS):
@@ -195,9 +208,11 @@ class BanditAgent:
         draws: list[float] = []
         for a in range(len(ACTIONS)):
             mean = np.asarray(self.state.weights[a], dtype=float)
-            cov_inv = np.asarray(self.state.cov_inv_matrices[a], dtype=float)
+            cov_inv = self._project_precision(np.asarray(self.state.cov_inv_matrices[a], dtype=float))
             cov = cov_inv * max(scale, 0.0)
             cov = self._ensure_positive_semidefinite(cov)
+            if not np.all(np.isfinite(cov)):
+                cov = np.eye(self._feature_size, dtype=float) * max(scale, 0.0)
             if scale <= 0:
                 w = mean
             else:
@@ -205,7 +220,10 @@ class BanditAgent:
                 try:
                     w = np.random.multivariate_normal(mean, cov)
                 except np.linalg.LinAlgError:
-                    w = np.random.multivariate_normal(mean, cov + jitter)
+                    try:
+                        w = np.random.multivariate_normal(mean, cov + jitter)
+                    except np.linalg.LinAlgError:
+                        w = mean
             draws.append(float(np.dot(w, f)))
         return np.asarray(draws), means
 
@@ -214,7 +232,7 @@ class BanditAgent:
 
         sym = 0.5 * (cov + cov.T)
         eigvals, eigvecs = np.linalg.eigh(sym)
-        floor = 1e-9
+        floor = 1e-6
         clipped = np.clip(eigvals, floor, None)
         psd = eigvecs @ np.diag(clipped) @ eigvecs.T
         return 0.5 * (psd + psd.T)
@@ -288,7 +306,7 @@ class BanditAgent:
         x_col = x.reshape(-1, 1)
         denom = float(1.0 + (x_col.T @ cov_inv @ x_col))
         cov_update = (cov_inv @ x_col @ x_col.T @ cov_inv) / denom
-        new_cov_inv = cov_inv - cov_update
+        new_cov_inv = self._project_precision(cov_inv - cov_update)
         new_bias = np.asarray(self.state.bias_vectors[a_idx], dtype=float) + y * x
 
         self.state.cov_inv_matrices[a_idx] = new_cov_inv.tolist()
@@ -371,7 +389,7 @@ class RLSForgettingAgent(BanditAgent):
         x_col = x.reshape(-1, 1)
         denom = float(1.0 + (x_col.T @ scaled_precision @ x_col))
         cov_update = (scaled_precision @ x_col @ x_col.T @ scaled_precision) / denom
-        new_cov_inv = scaled_precision - cov_update
+        new_cov_inv = self._project_precision(scaled_precision - cov_update)
 
         bias_prev = np.asarray(self.state.bias_vectors[a_idx], dtype=float)
         new_bias = (bias_prev * lam) + (y * x)
