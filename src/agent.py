@@ -122,6 +122,22 @@ class BanditAgent:
         projected = eigvecs @ np.diag(clipped) @ eigvecs.T
         return 0.5 * (projected + projected.T)
 
+    def _precision_to_covariance(self, precision: np.ndarray, scale: float) -> np.ndarray:
+        """Return PSD covariance from a precision (inverse covariance) matrix."""
+
+        # Ensure symmetric positive-definite precision
+        P = self._project_precision(np.asarray(precision, dtype=float))
+        # Stable inversion via eigen-decomposition (avoid np.linalg.inv)
+        eigvals, eigvecs = np.linalg.eigh(P)
+        floor = 1e-8
+        inv_eigs = 1.0 / np.clip(eigvals, floor, None)
+        # Scale the posterior covariance for Thompson sampling
+        cov = eigvecs @ np.diag(inv_eigs * max(scale, 0.0)) @ eigvecs.T
+        cov = self._ensure_positive_semidefinite(cov)
+        # Add tiny jitter to kill borderline negatives from roundoff
+        cov += np.eye(self._feature_size, dtype=float) * 1e-10
+        return cov
+
     def _ensure_covariance_shape(self) -> None:
         identity_scale = self.state.ridge_factor if self.state.ridge_factor > 0 else 1.0
         base = np.eye(self._feature_size, dtype=float) / identity_scale
@@ -208,9 +224,8 @@ class BanditAgent:
         draws: list[float] = []
         for a in range(len(ACTIONS)):
             mean = np.asarray(self.state.weights[a], dtype=float)
-            cov_inv = self._project_precision(np.asarray(self.state.cov_inv_matrices[a], dtype=float))
-            cov = cov_inv * max(scale, 0.0)
-            cov = self._ensure_positive_semidefinite(cov)
+            cov_inv = np.asarray(self.state.cov_inv_matrices[a], dtype=float)
+            cov = self._precision_to_covariance(cov_inv, scale)
             if not np.all(np.isfinite(cov)):
                 cov = np.eye(self._feature_size, dtype=float) * max(scale, 0.0)
             if scale <= 0:
