@@ -12,7 +12,7 @@ from typing import Iterable
 import pandas as pd
 
 from src import config
-from src.agent import BanditAgent
+from src.agent import RLSForgettingAgent
 from src.data_feed import DataFeed, MarketConfig
 from src.dashboard import live_dashboard
 from src.timeframe import timeframe_to_minutes
@@ -76,6 +76,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Override POSTERIOR_SCALE used for Thompson sampling (0 disables sampling).",
+    )
+    parser.add_argument(
+        "--forgetting-factor",
+        type=float,
+        default=None,
+        help="Forgetting factor (lambda) for RLS updates; 1.0 falls back to no forgetting.",
     )
     parser.add_argument("--eval", action="store_true", help="Run one evaluation pass without training or saving state")
     return parser.parse_args()
@@ -269,7 +275,9 @@ def main() -> None:
         )
     )
 
-    agent = BanditAgent(posterior_scale=args.posterior_scale)
+    agent = RLSForgettingAgent(
+        posterior_scale=args.posterior_scale, forgetting_factor=args.forgetting_factor
+    )
     agent.state.run_id = agent.state.run_id or run_id
     agent.state.symbol = agent.state.symbol or args.symbol
     agent.state.timeframe = agent.state.timeframe or args.timeframe

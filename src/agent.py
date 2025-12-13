@@ -34,6 +34,7 @@ class AgentState:
     feature_clip: float = config.FEATURE_CLIP
     weight_clip: float = config.WEIGHT_CLIP
     ridge_factor: float = config.RIDGE_FACTOR
+    forgetting_factor: float = config.FORGETTING_FACTOR
     posterior_scale: float = config.POSTERIOR_SCALE
     indicator_columns: list[str] = field(default_factory=lambda: FEATURE_COLUMNS[:])
 
@@ -76,6 +77,7 @@ class AgentState:
         data.setdefault("feature_clip", config.FEATURE_CLIP)
         data.setdefault("weight_clip", config.WEIGHT_CLIP)
         data.setdefault("ridge_factor", config.RIDGE_FACTOR)
+        data.setdefault("forgetting_factor", config.FORGETTING_FACTOR)
         data.setdefault("posterior_scale", config.POSTERIOR_SCALE)
         data.setdefault("indicator_columns", FEATURE_COLUMNS[:])
         # Ignore any unknown fields from legacy state files.
@@ -87,10 +89,14 @@ class AgentState:
 class BanditAgent:
     """Linear contextual bandit with Thompson sampling; now supports optional TD(0) targets."""
 
-    def __init__(self, *, posterior_scale: float | None = None):
+    def __init__(self, *, posterior_scale: float | None = None, forgetting_factor: float | None = None):
         self.state = AgentState.from_json(Path(config.STATE_PATH))
         self.posterior_scale = posterior_scale if posterior_scale is not None else self.state.posterior_scale
         self.state.posterior_scale = self.posterior_scale
+        self.forgetting_factor = (
+            forgetting_factor if forgetting_factor is not None else self.state.forgetting_factor
+        )
+        self.state.forgetting_factor = self.forgetting_factor
         self._prepare_state()
 
     # --- utilities ------------------------------------------------------------
@@ -280,9 +286,6 @@ class BanditAgent:
         if trade_executed:
             self.state.trades += 1
         self.state.steps_seen += 1
-
-    # --- persistence -----------------------------------------------------------
-
     def save(self, *, run_dir: Path | None = None, checkpoint: bool = False,
              keep_last: int = 5) -> Path:
         target_dir = run_dir or Path(config.STATE_PATH).parent
@@ -318,3 +321,53 @@ class BanditAgent:
                 old.unlink()
             except OSError:
                 pass
+
+
+class RLSForgettingAgent(BanditAgent):
+    """Recursive least squares agent with exponential forgetting."""
+
+    def update(
+        self,
+        action: str,
+        reward: float,
+        features: np.ndarray,
+        *,
+        actual_reward: float | None = None,
+        trade_executed: bool = True,
+        next_features: np.ndarray | None = None,
+        allowed_next: list[str] | None = None,
+    ) -> None:
+        x = self._sanitize(features)
+        a_idx = ACTIONS.index(action)
+
+        y = reward
+        if config.USE_TD and next_features is not None and allowed_next:
+            next_means = self._estimate_rewards(next_features)
+            next_idxs = [ACTIONS.index(a) for a in allowed_next]
+            boot = float(np.max(next_means[next_idxs])) if len(next_idxs) else 0.0
+            y = reward + config.TD_GAMMA * boot
+
+        lam = float(self.forgetting_factor)
+        if lam <= 0:
+            lam = 1e-6
+        elif lam > 1:
+            lam = 1.0
+
+        cov_inv = np.asarray(self.state.cov_inv_matrices[a_idx], dtype=float)
+        scaled_precision = cov_inv / lam
+        x_col = x.reshape(-1, 1)
+        denom = float(1.0 + (x_col.T @ scaled_precision @ x_col))
+        cov_update = (scaled_precision @ x_col @ x_col.T @ scaled_precision) / denom
+        new_cov_inv = scaled_precision - cov_update
+
+        bias_prev = np.asarray(self.state.bias_vectors[a_idx], dtype=float)
+        new_bias = (bias_prev * lam) + (y * x)
+
+        self.state.cov_inv_matrices[a_idx] = new_cov_inv.tolist()
+        self.state.bias_vectors[a_idx] = new_bias.tolist()
+        self._recompute_weights(a_idx)
+        self.state.q_values = list(self._estimate_rewards(x))
+        self.state.total_reward += reward if actual_reward is None else actual_reward
+        if trade_executed:
+            self.state.trades += 1
+        self.state.steps_seen += 1

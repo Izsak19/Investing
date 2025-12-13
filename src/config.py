@@ -27,6 +27,7 @@ TD_GAMMA = 0.90             # discount for TD target
 
 # Ridge prior strength: higher -> more conservative updates early on
 RIDGE_FACTOR = 1.0
+FORGETTING_FACTOR = 0.99    # exponential decay for RLS updates; 1.0 disables forgetting
 
 # Thompson sampling scale (exploration). We decay this with a half-life schedule.
 POSTERIOR_SCALE = 0.35
