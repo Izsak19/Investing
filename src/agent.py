@@ -197,10 +197,7 @@ class BanditAgent:
             mean = np.asarray(self.state.weights[a], dtype=float)
             cov_inv = np.asarray(self.state.cov_inv_matrices[a], dtype=float)
             cov = cov_inv * max(scale, 0.0)
-            cov = 0.5 * (cov + cov.T)
-            min_eig = float(np.min(np.linalg.eigvalsh(cov)))
-            if min_eig < 0.0:
-                cov += np.eye(self._feature_size, dtype=float) * (-min_eig + 1e-9)
+            cov = self._ensure_positive_semidefinite(cov)
             if scale <= 0:
                 w = mean
             else:
@@ -211,6 +208,16 @@ class BanditAgent:
                     w = np.random.multivariate_normal(mean, cov + jitter)
             draws.append(float(np.dot(w, f)))
         return np.asarray(draws), means
+
+    def _ensure_positive_semidefinite(self, cov: np.ndarray) -> np.ndarray:
+        """Return a symmetric positive semi-definite covariance matrix."""
+
+        sym = 0.5 * (cov + cov.T)
+        eigvals, eigvecs = np.linalg.eigh(sym)
+        floor = 1e-9
+        clipped = np.clip(eigvals, floor, None)
+        psd = eigvecs @ np.diag(clipped) @ eigvecs.T
+        return 0.5 * (psd + psd.T)
 
     @staticmethod
     def _half_life_decay(step: int | None) -> float:
