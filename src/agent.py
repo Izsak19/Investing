@@ -198,6 +198,9 @@ class BanditAgent:
             cov_inv = np.asarray(self.state.cov_inv_matrices[a], dtype=float)
             cov = cov_inv * max(scale, 0.0)
             cov = 0.5 * (cov + cov.T)
+            min_eig = float(np.min(np.linalg.eigvalsh(cov)))
+            if min_eig < 0.0:
+                cov += np.eye(self._feature_size, dtype=float) * (-min_eig + 1e-9)
             if scale <= 0:
                 w = mean
             else:
