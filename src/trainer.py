@@ -368,6 +368,23 @@ class Trainer:
         position_before = self.portfolio.position
         cash_before = self.portfolio.cash
 
+        if action == "hold" and stuck_relax and proposed_action in allowed_actions:
+            # When the agent is clearly stuck in HOLD, allow one-off execution of the
+            # originally proposed action (buy/sell) even if gates would normally
+            # block it. This keeps exploration alive instead of freezing.
+            if proposed_action == "buy" and cash_before > 0:
+                action = "buy"
+                hold_reason = None
+                gate_blocked = False
+                timing_blocked = False
+                budget_blocked = False
+            elif proposed_action == "sell" and position_before > 0:
+                action = "sell"
+                hold_reason = None
+                gate_blocked = False
+                timing_blocked = False
+                budget_blocked = False
+
         # --- execution (fees applied; turnover penalty applied) ----------------
         if action == "buy" and cash_before > 0:
             pos_frac = self._dynamic_fraction(buy_margin)
