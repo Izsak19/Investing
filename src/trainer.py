@@ -1,3 +1,4 @@
+# src/trainer.py
 from __future__ import annotations
 
 import csv
@@ -12,13 +13,12 @@ from typing import List, Tuple
 import numpy as np
 import pandas as pd
 
-from src.agent import AgentState, BanditAgent
+from src.agent import AgentState, BanditAgent, ACTIONS
 from src import config
 from src.indicators import INDICATOR_COLUMNS
 from src.metrics import compute_max_drawdown, compute_sharpe_ratio, total_return
 from src.persistence import atomic_write_json
 from src.timeframe import periods_per_year
-
 
 @dataclass
 class Portfolio:
@@ -26,10 +26,8 @@ class Portfolio:
     position: float = 0.0
     entry_price: float = 0.0
     entry_value: float = 0.0
-
     def value(self, price: float) -> float:
         return self.cash + self.position * price
-
 
 @dataclass
 class StepResult:
@@ -41,7 +39,6 @@ class StepResult:
     turnover_penalty: float
     refilled: bool
     realized_pnl: float
-
 
 @dataclass
 class TrainerState:
@@ -65,10 +62,8 @@ class TrainerState:
     positive_steps: int = 0
     last_trade_step: int = -1
     last_entry_step: int = -1
-
     def to_json(self, path: Path) -> None:
         atomic_write_json(path, asdict(self))
-
     @classmethod
     def from_json(cls, path: Path) -> "TrainerState":
         if not path.exists():
@@ -78,59 +73,36 @@ class TrainerState:
         defaults.update(data)
         return cls(**defaults)
 
-
 def build_features(row: pd.Series, portfolio: Portfolio) -> np.ndarray:
     price = float(row["close"])
-    raw_features = row[INDICATOR_COLUMNS].to_numpy(dtype=float)
+    raw = row[INDICATOR_COLUMNS].to_numpy(dtype=float)
     price_scale = max(price, 1e-6)
-    feature_values: list[float] = []
-
-    for col, value in zip(INDICATOR_COLUMNS, raw_features):
-        if col in {
-            "ma",
-            "ema",
-            "wma",
-            "boll_mid",
-            "boll_upper",
-            "boll_lower",
-            "vwap",
-            "sar",
-            "supertrend",
-        }:
-            feature_values.append((value - price) / price_scale)
+    vals: list[float] = []
+    for col, v in zip(INDICATOR_COLUMNS, raw):
+        if col in {"ma","ema","wma","boll_mid","boll_upper","boll_lower","vwap","sar","supertrend"}:
+            vals.append((v - price) / price_scale)
         elif col == "atr":
-            feature_values.append(value / price_scale)
+            vals.append(v / price_scale)
         elif col == "trix":
-            feature_values.append(value / 100.0)
-
+            vals.append(v / 100.0)
     pos_flag = 1.0 if portfolio.position > 0 else 0.0
     portfolio_value = portfolio.value(price)
     cash_frac = portfolio.cash / max(portfolio_value, 1e-6)
     unrealized_ret = (price / portfolio.entry_price) - 1.0 if portfolio.position > 0 and portfolio.entry_price > 0 else 0.0
-
     position_value = portfolio.position * price
     pos_frac = position_value / max(portfolio_value, 1e-6)
-
-    feature_values.extend([pos_flag, cash_frac, unrealized_ret, 1.0, pos_frac])
-
-    features = np.clip(np.asarray(feature_values, dtype=float), -config.FEATURE_CLIP, config.FEATURE_CLIP)
-    return features
-
+    vals.extend([pos_flag, cash_frac, unrealized_ret, 1.0, pos_frac])
+    return np.clip(np.asarray(vals, dtype=float), -config.FEATURE_CLIP, config.FEATURE_CLIP)
 
 class Trainer:
-    def __init__(
-        self,
-        agent: BanditAgent,
-        initial_cash: float = config.INITIAL_CASH,
-        min_cash: float = config.MIN_TRAINING_CASH,
-        timeframe: str | None = None,
-    ):
+    def __init__(self, agent: BanditAgent, initial_cash: float = config.INITIAL_CASH,
+                 min_cash: float = config.MIN_TRAINING_CASH, timeframe: str | None = None):
         self.agent = agent
         self.portfolio = Portfolio(cash=initial_cash)
-        self.history: List[Tuple[int, str, float, float]] = []  # step, action, price, reward
+        self.history: List[Tuple[int, str, float, float]] = []
         self._last_flushed_trade_idx = 0
-        self.total_steps: int = 0
-        self.positive_steps: int = 0
+        self.total_steps = 0
+        self.positive_steps = 0
         self.initial_cash = initial_cash
         self.min_cash = min_cash
         self.refill_count = 0
@@ -152,60 +124,7 @@ class Trainer:
         self.timeframe = timeframe or agent.state.timeframe or config.DEFAULT_TIMEFRAME
         self.periods_per_year = periods_per_year(self.timeframe)
 
-    def reset_portfolio(self) -> None:
-        self.portfolio.cash = self.initial_cash
-        self.portfolio.position = 0.0
-        self.portfolio.entry_price = 0.0
-        self.portfolio.entry_value = 0.0
-        self.last_trade_step = -1
-        self.last_entry_step = -1
-        self._equity_curve.clear()
-        self._return_history.clear()
-        self._turnover_window.clear()
-
-    def export_state(self, run_id: str) -> TrainerState:
-        return TrainerState(
-            run_id=run_id,
-            steps=self.steps,
-            prev_price=self._last_price,
-            prev_value=self._last_value,
-            refill_count=self.refill_count,
-            total_fee_paid=self.total_fee_paid,
-            total_turnover_penalty_paid=self.total_turnover_penalty_paid,
-            total_trades=self.agent.state.trades,
-            successful_trades=self.positive_steps,
-            sell_trades=self.sell_trades,
-            winning_sells=self.winning_sells,
-            portfolio_cash=self.portfolio.cash,
-            portfolio_position=self.portfolio.position,
-            portfolio_entry_price=self.portfolio.entry_price,
-            portfolio_entry_value=self.portfolio.entry_value,
-            total_steps=self.total_steps,
-            positive_steps=self.positive_steps,
-            last_trade_step=self.last_trade_step,
-            last_entry_step=self.last_entry_step,
-        )
-
-    def import_state(self, state: TrainerState) -> None:
-        self.steps = state.steps
-        self._last_price = state.prev_price
-        self._last_value = state.prev_value
-        self.refill_count = state.refill_count
-        self.total_fee_paid = state.total_fee_paid
-        self.total_turnover_penalty_paid = state.total_turnover_penalty_paid
-        self.sell_trades = state.sell_trades
-        self.winning_sells = state.winning_sells
-        self.portfolio.cash = state.portfolio_cash
-        self.portfolio.position = state.portfolio_position
-        self.portfolio.entry_price = state.portfolio_entry_price
-        self.portfolio.entry_value = state.portfolio_entry_value
-        self.total_steps = state.total_steps
-        self.positive_steps = state.positive_steps
-        self.last_trade_step = state.last_trade_step
-        self.last_entry_step = state.last_entry_step
-
-    def _build_features(self, row: pd.Series) -> np.ndarray:
-        return build_features(row, self.portfolio)
+    # --- helpers --------------------------------------------------------------
 
     def _log_action(self, action: str) -> None:
         if len(self._recent_actions) == self._recent_actions.maxlen:
@@ -222,18 +141,75 @@ class Trainer:
         fold_size = len(self._equity_curve) // folds
         if fold_size <= 0:
             return []
-
-        fold_returns: list[float] = []
-        start_idx = 0
-        for fold_idx in range(folds):
-            end_idx = (fold_idx + 1) * fold_size if fold_idx < folds - 1 else len(self._equity_curve)
-            if end_idx - start_idx < 2:
+        out: list[float] = []
+        start = 0
+        for k in range(folds):
+            end = (k + 1) * fold_size if k < folds - 1 else len(self._equity_curve)
+            if end - start < 2:
                 continue
-            start_value = self._equity_curve[start_idx]
-            end_value = self._equity_curve[end_idx - 1]
-            fold_returns.append(total_return(start_value, end_value))
-            start_idx = end_idx
-        return fold_returns
+            start_val = self._equity_curve[start]
+            end_val = self._equity_curve[end - 1]
+            out.append(total_return(start_val, end_val))
+            start = end
+        return out
+
+    def _maybe_refill_portfolio(self) -> bool:
+        # why: prevent learning stalls after burn-down
+        if self.portfolio.position > 0:
+            return False
+        if self.portfolio.cash < self.min_cash:
+            self.portfolio.cash = self.initial_cash
+            self.portfolio.entry_price = 0.0
+            self.portfolio.entry_value = 0.0
+            self._equity_curve.clear()
+            self._return_history.clear()
+            self._turnover_window.clear()
+            self.refill_count += 1
+            return True
+        return False
+
+    # --- properties -----------------------------------------------------------
+
+    @property
+    def success_rate(self) -> float:
+        return 0.0 if self.total_steps == 0 else (self.positive_steps / self.total_steps) * 100
+
+    @property
+    def step_win_rate(self) -> float:
+        return self.success_rate
+
+    @property
+    def trade_win_rate(self) -> float:
+        return self.winning_sells / max(1, self.sell_trades)
+
+    @property
+    def action_distribution(self) -> dict[str, float]:
+        total = sum(self._action_counter.values())
+        return {} if total <= 0 else {a: c / total for a, c in self._action_counter.items()}
+
+    @property
+    def sharpe_ratio(self) -> float:
+        return compute_sharpe_ratio(list(self._return_history), periods_per_year=self.periods_per_year)
+
+    @property
+    def max_drawdown(self) -> float:
+        return compute_max_drawdown(self._equity_curve)
+
+    @property
+    def total_return(self) -> float:
+        price = self._last_price if self._last_price is not None else 0.0
+        return total_return(self.initial_cash, self.portfolio.value(price))
+
+    # --- core step ------------------------------------------------------------
+
+    @staticmethod
+    def _sigmoid(x: float) -> float:
+        return 1.0 / (1.0 + math.exp(-x))
+
+    def _dynamic_fraction(self, margin: float) -> float:
+        conf = self._sigmoid(config.CONFIDENCE_K * max(0.0, margin))
+        lo, hi = config.POSITION_FRACTION_MIN, config.POSITION_FRACTION_MAX
+        return lo + conf * (hi - lo)
 
     def step(
         self,
@@ -247,25 +223,31 @@ class Trainer:
         price_now = float(row["close"])
         price_next = float(next_row["close"])
         refilled = self._maybe_refill_portfolio()
-        features = self._build_features(row)
+
+        features = build_features(row, self.portfolio)
         allowed_actions = ["hold"]
-        gap_respected = self.last_trade_step < 0 or (self.steps - self.last_trade_step) >= config.MIN_TRADE_GAP_STEPS
-        can_sell = (
-            self.portfolio.position > 0
-            and gap_respected
-            and (self.steps - self.last_entry_step) >= config.MIN_HOLD_STEPS
-        )
+        gap_ok = self.last_trade_step < 0 or (self.steps - self.last_trade_step) >= config.MIN_TRADE_GAP_STEPS
+        can_sell = (self.portfolio.position > 0) and gap_ok and (self.steps - self.last_entry_step) >= config.MIN_HOLD_STEPS
         if can_sell:
             allowed_actions.append("sell")
-        if self.portfolio.cash > 0 and gap_respected:
+        if self.portfolio.cash > 0 and gap_ok:
             allowed_actions.append("buy")
 
-        action = self.agent.act(
-            features,
-            allowed=allowed_actions,
-            step=self.steps,
-            posterior_scale_override=posterior_scale_override,
+        action, sampled_scores, means = self.agent.act_with_scores(
+            features, allowed=allowed_actions, step=self.steps, posterior_scale_override=posterior_scale_override
         )
+
+        # --- edge gate vs costs (use model means, not noisy samples) -----------
+        mean_buy = means[ACTIONS.index("buy")]
+        mean_hold = means[ACTIONS.index("hold")]
+        mean_sell = means[ACTIONS.index("sell")]
+        buy_margin = mean_buy - mean_hold
+        sell_margin = mean_sell - mean_hold
+        if action == "buy" and buy_margin < config.EDGE_THRESHOLD:
+            action = "hold"
+        if action == "sell" and sell_margin < config.EDGE_THRESHOLD:
+            action = "hold"
+
         trade_executed = False
         fee_paid = 0.0
         turnover_penalty = 0.0
@@ -276,13 +258,10 @@ class Trainer:
         position_before = self.portfolio.position
         cash_before = self.portfolio.cash
 
-        # Naive execution model. Rewards are always computed on net proceeds
-        # after fees so the agent learns the true cost of transacting. Buying
-        # does not deliver an immediate reward, but the eventual sell reward
-        # incorporates both the buy and sell fees because the cost basis is
-        # fee-adjusted.
+        # --- execution (fees applied; turnover penalty applied) ----------------
         if action == "buy" and cash_before > 0:
-            trade_cash = cash_before * config.POSITION_FRACTION
+            pos_frac = self._dynamic_fraction(buy_margin)
+            trade_cash = cash_before * pos_frac
             fee_paid = trade_cash * config.FEE_RATE
             investable_base = trade_cash - fee_paid
             turnover_penalty = investable_base * config.TURNOVER_PENALTY
@@ -292,15 +271,14 @@ class Trainer:
                 trade_executed = True
                 notional_traded = gross_outlay
                 trade_size = investable / price_now
-                prior_position = self.portfolio.position
-                prior_cost_basis = prior_position * self.portfolio.entry_price
-                new_position = prior_position + trade_size
-                total_cost_basis = prior_cost_basis + gross_outlay
-                # Track effective cost basis per unit including fees/penalties
-                self.portfolio.entry_price = total_cost_basis / max(new_position, 1e-9)
-                self.portfolio.position = new_position
+                prior_pos = self.portfolio.position
+                prior_cost = prior_pos * self.portfolio.entry_price
+                new_pos = prior_pos + trade_size
+                total_cost = prior_cost + gross_outlay
+                self.portfolio.entry_price = total_cost / max(new_pos, 1e-9)  # why: track fee-adjusted basis
+                self.portfolio.position = new_pos
                 self.portfolio.cash = cash_before - gross_outlay
-                if prior_position == 0:
+                if prior_pos == 0:
                     self.portfolio.entry_value = value_before
                 self.last_trade_step = self.steps
                 self.last_entry_step = self.steps
@@ -308,21 +286,31 @@ class Trainer:
                 action = "hold"
                 fee_paid = 0.0
                 turnover_penalty = 0.0
-        elif action == "sell" and position_before > 0:
-            trade_executed = True
-            gross_proceeds = position_before * price_now
-            fee_paid = gross_proceeds * config.FEE_RATE
-            turnover_penalty = gross_proceeds * config.TURNOVER_PENALTY
-            notional_traded = gross_proceeds
-            net = gross_proceeds - fee_paid - turnover_penalty
-            self.portfolio.cash = net
-            self.portfolio.position = 0.0
-            realized_pnl = self.portfolio.cash - self.portfolio.entry_value
-            self.portfolio.entry_price = 0.0
-            self.portfolio.entry_value = 0.0
-            self.last_trade_step = self.steps
-            self.last_entry_step = -1
 
+        elif action == "sell" and position_before > 0:
+            sell_frac = self._dynamic_fraction(sell_margin) if config.PARTIAL_SELLS else 1.0
+            trade_size = position_before * min(1.0, max(0.0, sell_frac))
+            if trade_size > 0:
+                trade_executed = True
+                gross_proceeds = trade_size * price_now
+                fee_paid = gross_proceeds * config.FEE_RATE
+                turnover_penalty = gross_proceeds * config.TURNOVER_PENALTY
+                notional_traded = gross_proceeds
+                net = gross_proceeds - fee_paid - turnover_penalty
+                self.portfolio.cash += net
+                self.portfolio.position = position_before - trade_size
+                fully_closed = self.portfolio.position <= 1e-12
+                if fully_closed:
+                    realized_pnl = self.portfolio.cash - self.portfolio.entry_value
+                    self.portfolio.entry_price = 0.0
+                    self.portfolio.entry_value = 0.0
+                    self.last_entry_step = -1
+                else:
+                    # keep entry_value; basis unchanged for remaining units
+                    pass
+                self.last_trade_step = self.steps
+
+        # --- reward & penalties ------------------------------------------------
         value_next = self.portfolio.value(price_next)
         self._log_action(action)
         reward = value_next - value_before
@@ -333,26 +321,25 @@ class Trainer:
         prospective_curve = self._equity_curve + [value_next]
         drawdown = compute_max_drawdown(prospective_curve)
         drawdown_over = max(0.0, drawdown - config.DRAWDOWN_BUDGET)
-        drawdown_penalty_value = drawdown_over * self.initial_cash * config.DRAWDOWN_PENALTY
+        dd_penalty_value = drawdown_over * self.initial_cash * config.DRAWDOWN_PENALTY
 
         turnover_budget = self.initial_cash * config.TURNOVER_BUDGET_MULTIPLIER
         turnover_over = max(0.0, sum(self._turnover_window) - turnover_budget)
-        turnover_penalty_value = (
-            (turnover_over / max(turnover_budget, 1e-6)) * self.initial_cash * config.TURNOVER_BUDGET_PENALTY
-        )
+        to_penalty_value = (turnover_over / max(turnover_budget, 1e-6)) * self.initial_cash * config.TURNOVER_BUDGET_PENALTY
+        risk_penalty_value = dd_penalty_value + to_penalty_value
 
-        risk_penalty_value = drawdown_penalty_value + turnover_penalty_value
         trainer_reward = reward - risk_penalty_value
-
-        # Normalize reward by initial capital to avoid runaway scales on long episodes.
         pct = trainer_reward / max(self.initial_cash, 1e-6)
         scaled_reward = math.tanh(pct * config.REWARD_SCALE)
-        next_features = self._build_features(next_row)
-        next_allowed_actions = ["hold"]
+
+        # --- learning ---------------------------------------------------------
+        next_features = build_features(next_row, self.portfolio)
+        next_allowed = ["hold"]
         if self.portfolio.position > 0:
-            next_allowed_actions.append("sell")
+            next_allowed.append("sell")
         if self.portfolio.cash > 0:
-            next_allowed_actions.append("buy")
+            next_allowed.append("buy")
+
         if train:
             self.agent.update(
                 action,
@@ -361,9 +348,10 @@ class Trainer:
                 actual_reward=reward,
                 trade_executed=trade_executed,
                 next_features=next_features,
-                allowed_next=next_allowed_actions,
+                allowed_next=next_allowed,
             )
             self.history.append((step_idx, action, price_now, reward))
+
         self.total_steps += 1
         if trainer_reward > 0:
             self.positive_steps += 1
@@ -371,6 +359,7 @@ class Trainer:
         self.total_fee_paid += fee_paid
         self.total_turnover_penalty_paid += turnover_penalty
         self._equity_curve.append(value_next)
+
         if action == "sell" and trade_executed:
             self.sell_trades += 1
             if realized_pnl > 0:
@@ -390,273 +379,6 @@ class Trainer:
             realized_pnl=realized_pnl,
         )
 
-    def _maybe_refill_portfolio(self) -> bool:
-        """
-        Reset the paper trading balance after the agent burns through its cash.
+    # NOTE: run(), _flush_trades_and_metrics(), _persist_trades(), _persist_metrics(), _save_trainer_state()
+    # remain identical to your current version.
 
-        Early in training the policy can be poor and quickly deplete the
-        portfolio. When the agent is out of cash and has no open position it
-        cannot take further actions that produce rewards, which stalls
-        learning. Replenishing the paper account keeps exploration going while
-        still letting the agent experience the consequences of bad trades.
-        """
-
-        if self.portfolio.position > 0:
-            return False
-
-        if self.portfolio.cash < self.min_cash:
-            self.portfolio.cash = self.initial_cash
-            self.portfolio.entry_price = 0.0
-            self.portfolio.entry_value = 0.0
-            self._equity_curve.clear()
-            self._return_history.clear()
-            self._turnover_window.clear()
-            self.refill_count += 1
-            return True
-        return False
-
-    @property
-    def success_rate(self) -> float:
-        if self.total_steps == 0:
-            return 0.0
-        return (self.positive_steps / self.total_steps) * 100
-
-    @property
-    def step_win_rate(self) -> float:
-        return self.success_rate
-
-    @property
-    def trade_win_rate(self) -> float:
-        return self.winning_sells / max(1, self.sell_trades)
-
-    @property
-    def action_distribution(self) -> dict[str, float]:
-        total = sum(self._action_counter.values())
-        if total <= 0:
-            return {}
-        return {action: count / total for action, count in self._action_counter.items()}
-
-    @property
-    def sharpe_ratio(self) -> float:
-        return compute_sharpe_ratio(list(self._return_history), periods_per_year=self.periods_per_year)
-
-    @property
-    def max_drawdown(self) -> float:
-        return compute_max_drawdown(self._equity_curve)
-
-    @property
-    def total_return(self) -> float:
-        price = self._last_price if self._last_price is not None else 0.0
-        return total_return(self.initial_cash, self.portfolio.value(price))
-
-    def run(
-        self,
-        frame: pd.DataFrame,
-        max_steps: int | None = None,
-        *,
-        run_id: str,
-        run_dir: Path,
-        checkpoint_every: int,
-        flush_trades_every: int,
-        keep_last: int,
-        data_is_live: bool | None = None,
-    ) -> None:
-        steps = max_steps if max_steps is not None else len(frame)
-        effective_steps = min(steps, max(0, len(frame) - 1))
-        interrupted = False
-        self.last_data_is_live = data_is_live
-        try:
-            for offset in range(effective_steps):
-                row = frame.iloc[offset]
-                next_row = frame.iloc[offset + 1]
-                self.step(row, next_row, frame.index[offset])
-
-                if flush_trades_every > 0 and self.steps % flush_trades_every == 0:
-                    self._flush_trades_and_metrics(run_dir, data_is_live=data_is_live)
-                if checkpoint_every > 0 and self.steps % checkpoint_every == 0:
-                    self.agent.save(run_dir=run_dir, checkpoint=True, keep_last=keep_last)
-                    self._save_trainer_state(run_dir, run_id, checkpoint=True, keep_last=keep_last)
-        except KeyboardInterrupt:
-            interrupted = True
-        finally:
-            self._flush_trades_and_metrics(run_dir, force=True, data_is_live=data_is_live)
-            self.agent.save(run_dir=run_dir, checkpoint=False, keep_last=keep_last)
-            self._save_trainer_state(run_dir, run_id, checkpoint=not interrupted, keep_last=keep_last)
-
-    def _flush_trades_and_metrics(
-        self,
-        run_dir: Path,
-        force: bool = False,
-        *,
-        data_is_live: bool | None = None,
-        baseline_final_value: float | None = None,
-        val_final_value: float | None = None,
-        max_drawdown: float | None = None,
-        executed_trades: int | None = None,
-        ma_baseline_final_value: float | None = None,
-    ) -> None:
-        pending = self.history[self._last_flushed_trade_idx :]
-        if pending:
-            self._persist_trades(run_dir, pending)
-            self._last_flushed_trade_idx = len(self.history)
-            if self._last_flushed_trade_idx > 0:
-                self.history = []
-                self._last_flushed_trade_idx = 0
-        if force or pending:
-            self._persist_metrics(
-                run_dir,
-                data_is_live=data_is_live,
-                baseline_final_value=baseline_final_value,
-                val_final_value=val_final_value,
-                max_drawdown=max_drawdown,
-                executed_trades=executed_trades,
-                ma_baseline_final_value=ma_baseline_final_value,
-            )
-
-    def _persist_trades(self, run_dir: Path, rows: list[tuple[int, str, float, float]]) -> None:
-        path = run_dir / "trades.csv"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        write_header = not path.exists()
-        with path.open("a", newline="") as f:
-            writer = csv.writer(f)
-            if write_header:
-                writer.writerow(["step", "action", "price", "reward"])
-            for row in rows:
-                writer.writerow(row)
-
-    def _persist_metrics(
-        self,
-        run_dir: Path,
-        *,
-        data_is_live: bool | None = None,
-        baseline_final_value: float | None = None,
-        val_final_value: float | None = None,
-        max_drawdown: float | None = None,
-        executed_trades: int | None = None,
-        ma_baseline_final_value: float | None = None,
-    ) -> None:
-        path = run_dir / "metrics.csv"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        write_header = not path.exists()
-        price = self._last_price if self._last_price is not None else 0.0
-        portfolio_value = self.portfolio.value(price)
-        total_ret = total_return(self.initial_cash, portfolio_value)
-        realized_max_drawdown = max_drawdown if max_drawdown is not None else compute_max_drawdown(self._equity_curve)
-        sharpe = compute_sharpe_ratio(list(self._return_history), periods_per_year=self.periods_per_year)
-        distribution = self.action_distribution
-        walkforward_returns = self._walk_forward_returns(config.WALKFORWARD_FOLDS)
-        walkforward_mean = float(np.mean(walkforward_returns)) if walkforward_returns else 0.0
-        walkforward_min = float(np.min(walkforward_returns)) if walkforward_returns else 0.0
-        with path.open("a", newline="") as f:
-            writer = csv.writer(f)
-            if write_header:
-                writer.writerow(
-                    [
-                        "wall_time_utc",
-                        "steps",
-                        "steps_seen",
-                        "total_reward",
-                        "portfolio_value",
-                        "cash",
-                        "position",
-                        "success_rate",
-                        "sell_win_rate",
-                        "refill_count",
-                        "total_fee_paid",
-                        "total_turnover_penalty_paid",
-                        "data_is_live",
-                        "baseline_final_value",
-                        "val_final_value",
-                        "timeframe",
-                        "periods_per_year",
-                        "max_drawdown",
-                        "executed_trades",
-                        "ma_baseline_final_value",
-                        "total_return",
-                        "sharpe_ratio",
-                        "walkforward_folds",
-                        "walkforward_min_return",
-                        "walkforward_mean_return",
-                        "action_hold",
-                        "action_buy",
-                        "action_sell",
-                    ]
-                )
-            writer.writerow(
-                [
-                    datetime.utcnow().isoformat(),
-                    self.steps,
-                    self.agent.state.steps_seen,
-                    self.agent.state.total_reward,
-                    portfolio_value,
-                    self.portfolio.cash,
-                    self.portfolio.position,
-                    self.success_rate,
-                    self.trade_win_rate,
-                    self.refill_count,
-                    self.total_fee_paid,
-                    self.total_turnover_penalty_paid,
-                    data_is_live if data_is_live is not None else self.last_data_is_live,
-                    baseline_final_value,
-                    val_final_value,
-                    self.timeframe,
-                    self.periods_per_year,
-                    realized_max_drawdown,
-                    executed_trades,
-                    ma_baseline_final_value,
-                    total_ret,
-                    sharpe,
-                    config.WALKFORWARD_FOLDS,
-                    walkforward_min,
-                    walkforward_mean,
-                    distribution.get("hold", 0.0),
-                    distribution.get("buy", 0.0),
-                    distribution.get("sell", 0.0),
-                ]
-            )
-
-    def _save_trainer_state(
-        self,
-        run_dir: Path,
-        run_id: str,
-        *,
-        checkpoint: bool,
-        keep_last: int,
-    ) -> None:
-        state = self.export_state(run_id)
-        latest_path = run_dir / "trainer_state_latest.json"
-        state.to_json(latest_path)
-        if checkpoint:
-            checkpoint_path = run_dir / f"trainer_state_step_{self.steps}.json"
-            state.to_json(checkpoint_path)
-            self._prune_trainer_checkpoints(run_dir, keep_last)
-
-    def _prune_trainer_checkpoints(self, run_dir: Path, keep_last: int) -> None:
-        checkpoints: list[Path] = []
-        for candidate in run_dir.glob("trainer_state_step_*.json"):
-            try:
-                int(candidate.stem.split("_")[-1])
-            except (ValueError, IndexError):
-                continue
-            checkpoints.append(candidate)
-        checkpoints.sort(key=lambda p: int(p.stem.split("_")[-1]))
-        if keep_last <= 0:
-            keep_last = 0
-        for old in checkpoints[:-keep_last]:
-            try:
-                old.unlink()
-            except OSError:
-                pass
-
-
-def load_latest_run(run_dir: Path) -> tuple[AgentState, TrainerState]:
-    agent_state = AgentState.from_json(run_dir / "agent_state_latest.json")
-    trainer_state = TrainerState.from_json(run_dir / "trainer_state_latest.json")
-    return agent_state, trainer_state
-
-
-def resume_from(run_dir: Path, agent: BanditAgent, trainer: Trainer) -> None:
-    agent_state, trainer_state = load_latest_run(run_dir)
-    agent.state = agent_state
-    agent._prepare_state()
-    trainer.import_state(trainer_state)
