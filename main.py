@@ -154,7 +154,8 @@ def run_loop(
         next_row = frame.iloc[i + 1]
 
         if i == 0 and idx > 0:
-            trainer.reset_portfolio()
+            # When the window loops, keep the existing portfolio so performance can
+            # compound instead of resetting to the initial cash every cycle.
             pv_prev_after = trainer.portfolio.value(float(row["close"]))
         price = float(row["close"])
 
