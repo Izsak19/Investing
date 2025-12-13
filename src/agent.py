@@ -58,6 +58,10 @@ class AgentState:
             return cls.default()
         data = json.loads(path.read_text())
         size = len(FEATURE_COLUMNS)
+        # Backward compatibility: older checkpoints stored an `alpha` exploration
+        # parameter instead of `posterior_scale`.
+        if "alpha" in data and "posterior_scale" not in data:
+            data["posterior_scale"] = data.get("alpha", config.POSTERIOR_SCALE)
         data.setdefault("weights", [[0.0 for _ in FEATURE_COLUMNS] for _ in ACTIONS])
         data.setdefault("cov_inv_matrices", [(np.eye(size, dtype=float) / config.RIDGE_FACTOR).tolist() for _ in ACTIONS])
         data.setdefault("bias_vectors", [[0.0 for _ in FEATURE_COLUMNS] for _ in ACTIONS])
@@ -74,7 +78,10 @@ class AgentState:
         data.setdefault("ridge_factor", config.RIDGE_FACTOR)
         data.setdefault("posterior_scale", config.POSTERIOR_SCALE)
         data.setdefault("indicator_columns", FEATURE_COLUMNS[:])
-        return cls(**data)
+        # Ignore any unknown fields from legacy state files.
+        allowed = set(cls.__dataclass_fields__.keys())
+        filtered = {k: v for k, v in data.items() if k in allowed}
+        return cls(**filtered)
 
 
 class BanditAgent:
