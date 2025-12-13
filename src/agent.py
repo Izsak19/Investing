@@ -116,11 +116,23 @@ class BanditAgent:
         """Symmetrize and floor eigenvalues to keep precision matrices well-behaved."""
 
         sym = 0.5 * (matrix + matrix.T)
-        eigvals, eigvecs = np.linalg.eigh(sym)
-        floor = 1e-9
-        clipped = np.clip(eigvals, floor, None)
-        projected = eigvecs @ np.diag(clipped) @ eigvecs.T
-        return 0.5 * (projected + projected.T)
+        sym = np.nan_to_num(sym, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
+        sym = np.clip(sym, -1e6, 1e6)
+
+        # Try progressively larger jitter to avoid eigenvalue convergence failures.
+        for jitter in (0.0, 1e-9, 1e-6):
+            try:
+                eigvals, eigvecs = np.linalg.eigh(sym + (np.eye(sym.shape[0]) * jitter))
+                floor = 1e-9
+                clipped = np.clip(eigvals, floor, None)
+                projected = eigvecs @ np.diag(clipped) @ eigvecs.T
+                return 0.5 * (projected + projected.T)
+            except np.linalg.LinAlgError:
+                continue
+
+        # If all attempts fail, fall back to a diagonal precision matrix.
+        fallback_scale = 1.0 / (self.state.ridge_factor if self.state.ridge_factor > 0 else 1.0)
+        return np.eye(sym.shape[0], dtype=float) * fallback_scale
 
     def _precision_to_covariance(self, precision: np.ndarray, scale: float) -> np.ndarray:
         """Return PSD covariance from a precision (inverse covariance) matrix."""
