@@ -208,6 +208,8 @@ class Trainer:
             base_scale = self.agent.posterior_scale
         boosted_scale = base_scale + config.STUCK_POSTERIOR_BOOST
         relaxed_edge = min(config.EDGE_THRESHOLD, config.STUCK_EDGE_THRESHOLD)
+        if hold_ratio >= 0.99:
+            relaxed_edge = 0.0
         return boosted_scale, relaxed_edge, True
 
     def _walk_forward_returns(self, folds: int) -> list[float]:
