@@ -84,6 +84,24 @@ def parse_args() -> argparse.Namespace:
         help="Forgetting factor (lambda) for RLS updates; 1.0 falls back to no forgetting.",
     )
     parser.add_argument("--eval", action="store_true", help="Run one evaluation pass without training or saving state")
+    parser.add_argument(
+        "--profile",
+        choices=sorted(config.PROFILES.keys()),
+        default=None,
+        help="Preset of exploration/penalty knobs (see config.PROFILES)",
+    )
+    parser.add_argument(
+        "--penalty-profile",
+        choices=sorted(config.PENALTY_PROFILES.keys()),
+        default="train",
+        help="Penalty weighting profile for reward shaping",
+    )
+    parser.add_argument(
+        "--warmup-trades",
+        type=int,
+        default=config.WARMUP_TRADES_BEFORE_GATING,
+        help="Number of executed trades before enabling gating and timing locks",
+    )
     return parser.parse_args()
 
 
@@ -172,6 +190,7 @@ def stream_live(
     checkpoint_every: int,
     flush_trades_every: int,
     keep_last: int,
+    posterior_scale_override: float | None = None,
 ) -> Iterable[tuple[int, pd.Series, StepResult, float, float, float]]:
     """Continuously fetch new market data and yield trading events indefinitely."""
 
@@ -198,7 +217,7 @@ def stream_live(
 
             price = float(row["close"])
             before_trade_value = trainer.portfolio.value(price)
-            result = trainer.step(row, next_row, idx)
+            result = trainer.step(row, next_row, idx, posterior_scale_override=posterior_scale_override)
             after_trade_value = trainer.portfolio.value(price)
             trade_impact = after_trade_value - before_trade_value
             mtm_delta = after_trade_value - pv_prev_after
@@ -230,10 +249,13 @@ def _initialize_offline_seeds(seed: int, run_dir: Path) -> None:
 
 def main() -> None:
     args = parse_args()
+    config.apply_profile(args.profile)
     eval_mode = args.eval
     if eval_mode and args.continuous:
         print("--eval disables --continuous; running a bounded evaluation pass instead.")
         args.continuous = False
+    if args.warmup_trades is not None:
+        config.WARMUP_TRADES_BEFORE_GATING = max(0, args.warmup_trades)
     limit = args.limit
     if args.offline and args.duration:
         candles_for_window = math.ceil(args.duration / timeframe_to_minutes(args.timeframe))
@@ -281,7 +303,14 @@ def main() -> None:
     agent.state.run_id = agent.state.run_id or run_id
     agent.state.symbol = agent.state.symbol or args.symbol
     agent.state.timeframe = agent.state.timeframe or args.timeframe
-    trainer = Trainer(agent, timeframe=args.timeframe)
+    penalty_profile = "eval" if eval_mode else args.penalty_profile
+    trainer = Trainer(agent, timeframe=args.timeframe, penalty_profile=penalty_profile)
+    eval_scale_floor = max(config.POSTERIOR_SCALE_MIN, 1e-3)
+    posterior_override = (
+        args.posterior_scale if args.posterior_scale is not None else (eval_scale_floor if eval_mode else None)
+    )
+    if posterior_override is not None:
+        posterior_override = max(posterior_override, eval_scale_floor)
     if args.resume:
         resume_from(run_dir, agent, trainer)
     web_dashboard = WebDashboard(port=args.web_port) if args.web_dashboard else None
@@ -313,6 +342,7 @@ def main() -> None:
                     flush_trades_every=args.flush_trades_every,
                     keep_last=args.keep_last,
                     data_is_live=is_live,
+                    posterior_scale_override=posterior_override,
                 ):
                     yield event
                     _, _, _, portfolio_value, _, _ = event
@@ -341,6 +371,7 @@ def main() -> None:
                 checkpoint_every=args.checkpoint_every,
                 flush_trades_every=args.flush_trades_every,
                 keep_last=args.keep_last,
+                posterior_scale_override=posterior_override,
             )
 
         loop = warmup_then_stream()
@@ -361,7 +392,7 @@ def main() -> None:
             keep_last=args.keep_last,
             data_is_live=is_live,
             train=not eval_mode,
-            posterior_scale_override=0.0 if eval_mode else None,
+            posterior_scale_override=posterior_override,
         )
 
     try:
@@ -433,6 +464,9 @@ def main() -> None:
                         trainer.total_return,
                         trainer.max_drawdown,
                         trainer.action_distribution,
+                        trainer.gate_blocks,
+                        trainer.timing_blocks,
+                        trainer.budget_blocks,
                     )
 
             render(enrich(loop))

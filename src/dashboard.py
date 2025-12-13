@@ -30,6 +30,9 @@ def build_table(
     total_return: float,
     max_drawdown: float,
     action_distribution: dict[str, float],
+    gate_blocks: int,
+    timing_blocks: int,
+    budget_blocks: int,
 ) -> Table:
     table = Table(title="Lightweight BTC/USDT Trainer", expand=True)
     table.add_column("Metric", justify="left")
@@ -56,6 +59,12 @@ def build_table(
     table.add_row("Total Return", f"{total_return:+.2%}")
     table.add_row("Sharpe Ratio", f"{sharpe_ratio:.3f}")
     table.add_row("Max Drawdown", f"{max_drawdown:.2%}")
+    table.add_row("Edge Margin", f"{result.edge_margin:+.4f} vs {config.EDGE_THRESHOLD:.4f}")
+    hold_reason = result.hold_reason or "-"
+    table.add_row("Hold Reason", hold_reason)
+    table.add_row("Gate Blocks", str(gate_blocks))
+    table.add_row("Timing Blocks", str(timing_blocks))
+    table.add_row("Budget Blocks", str(budget_blocks))
 
     q_values = Table.grid(expand=True)
     q_values.add_row("Q-values", ", ".join(f"{a}:{v:.3f}" for a, v in zip(ACTIONS, agent.state.q_values)))
@@ -87,6 +96,9 @@ def live_dashboard(
             float,
             float,
             dict[str, float],
+            int,
+            int,
+            int,
         ]
     ]
 ):
@@ -107,6 +119,9 @@ def live_dashboard(
             total_return,
             max_drawdown,
             action_distribution,
+            gate_blocks,
+            timing_blocks,
+            budget_blocks,
         ) in events:
             live.update(
                 build_table(
@@ -125,5 +140,8 @@ def live_dashboard(
                     total_return,
                     max_drawdown,
                     action_distribution,
+                    gate_blocks,
+                    timing_blocks,
+                    budget_blocks,
                 )
             )
