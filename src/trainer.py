@@ -230,14 +230,10 @@ class Trainer:
             start = end
         return out
 
-    def _maybe_refill_portfolio(self) -> bool:
+    def _maybe_refill_portfolio(self, price: float) -> bool:
         # why: prevent learning stalls after burn-down
-        if self.portfolio.position > 0:
-            return False
-        if self.portfolio.cash < self.min_cash:
-            self.portfolio.cash = self.initial_cash
-            self.portfolio.entry_price = 0.0
-            self.portfolio.entry_value = 0.0
+        if self.portfolio.value(price) < self.min_cash:
+            self.portfolio = Portfolio(cash=self.initial_cash)
             self._equity_curve.clear()
             self._return_history.clear()
             self._turnover_window.clear()
@@ -299,7 +295,7 @@ class Trainer:
     ) -> StepResult:
         price_now = float(row["close"])
         price_next = float(next_row["close"])
-        refilled = self._maybe_refill_portfolio()
+        refilled = self._maybe_refill_portfolio(price_now)
 
         features = build_features(row, self.portfolio)
         allowed_actions = ["hold"]
