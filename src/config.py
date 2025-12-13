@@ -54,6 +54,13 @@ ERROR_CLIP = 5.0
 MIN_HOLD_STEPS = 1
 MIN_TRADE_GAP_STEPS = 1
 
+# Adaptive rescue when the agent gets stuck in HOLD
+ENABLE_STUCK_UNFREEZE = True
+STUCK_HOLD_WINDOW = 800           # lookback actions used to decide if we're stuck
+STUCK_HOLD_RATIO = 0.9            # trigger when holds dominate this share of recent actions
+STUCK_POSTERIOR_BOOST = 0.35      # additive boost to exploration scale when stuck
+STUCK_EDGE_THRESHOLD = 0.00005    # relaxed edge gate used while stuck
+
 # Position sizing (dynamic)
 POSITION_FRACTION_MIN = 0.05     # min fraction when taking a trade
 POSITION_FRACTION_MAX = 0.75     # max fraction when model is very confident

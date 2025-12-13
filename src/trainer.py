@@ -45,6 +45,7 @@ class StepResult:
     gate_blocked: bool = False
     timing_blocked: bool = False
     budget_blocked: bool = False
+    stuck_relax: bool = False
 
 @dataclass
 class TrainerState:
@@ -188,6 +189,27 @@ class Trainer:
         self._recent_actions.append(action)
         self._action_counter[action] += 1
 
+    def _stuck_adaptation(self, posterior_scale_override: float | None) -> tuple[float | None, float, bool]:
+        if not config.ENABLE_STUCK_UNFREEZE:
+            return posterior_scale_override, config.EDGE_THRESHOLD, False
+
+        window = config.STUCK_HOLD_WINDOW
+        min_obs = max(25, window // 5)
+        total = len(self._recent_actions)
+        if total < min_obs:
+            return posterior_scale_override, config.EDGE_THRESHOLD, False
+
+        hold_ratio = self._action_counter.get("hold", 0) / max(total, 1)
+        if hold_ratio < config.STUCK_HOLD_RATIO:
+            return posterior_scale_override, config.EDGE_THRESHOLD, False
+
+        base_scale = posterior_scale_override
+        if base_scale is None:
+            base_scale = self.agent.posterior_scale
+        boosted_scale = base_scale + config.STUCK_POSTERIOR_BOOST
+        relaxed_edge = min(config.EDGE_THRESHOLD, config.STUCK_EDGE_THRESHOLD)
+        return boosted_scale, relaxed_edge, True
+
     def _walk_forward_returns(self, folds: int) -> list[float]:
         if folds <= 1 or len(self._equity_curve) < folds + 1:
             return []
@@ -284,8 +306,15 @@ class Trainer:
         if self.portfolio.position > 0:
             allowed_actions.append("sell")
 
+        posterior_scale_effective, edge_threshold, stuck_relax = self._stuck_adaptation(
+            posterior_scale_override
+        )
+
         action, sampled_scores, means = self.agent.act_with_scores(
-            features, allowed=allowed_actions, step=self.steps, posterior_scale_override=posterior_scale_override
+            features,
+            allowed=allowed_actions,
+            step=self.steps,
+            posterior_scale_override=posterior_scale_effective,
         )
 
         proposed_action = action
@@ -301,12 +330,12 @@ class Trainer:
         warmup_active = self.agent.state.trades < config.WARMUP_TRADES_BEFORE_GATING
 
         if not warmup_active:
-            if action == "buy" and buy_margin < config.EDGE_THRESHOLD:
+            if action == "buy" and buy_margin < edge_threshold:
                 action = "hold"
                 hold_reason = "gate"
                 gate_blocked = True
                 self.gate_blocks += 1
-            elif action == "sell" and sell_margin < config.EDGE_THRESHOLD:
+            elif action == "sell" and sell_margin < edge_threshold:
                 action = "hold"
                 hold_reason = "gate"
                 gate_blocked = True
@@ -481,6 +510,7 @@ class Trainer:
             gate_blocked=gate_blocked,
             timing_blocked=timing_blocked,
             budget_blocked=budget_blocked,
+            stuck_relax=stuck_relax,
         )
 
     # NOTE: run(), _flush_trades_and_metrics(), _persist_trades(), _persist_metrics(), _save_trainer_state()
