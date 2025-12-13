@@ -39,6 +39,17 @@ def _atr(high: pd.Series, low: pd.Series, close: pd.Series, length: int) -> pd.S
     return tr.rolling(length).mean()
 
 
+def _rolling_volatility(close: pd.Series, window: int = 50) -> pd.Series:
+    return close.pct_change().rolling(window).std()
+
+
+def _feature_scale(close: pd.Series, atr: pd.Series, window: int = 50) -> pd.Series:
+    vol = _rolling_volatility(close, window) * close
+    atr_scaled = (atr.abs()).fillna(0.0)
+    combined = pd.concat([vol, atr_scaled], axis=1)
+    return combined.max(axis=1).clip(lower=1e-6)
+
+
 def _trix(close: pd.Series, length: int) -> pd.Series:
     ema1 = close.ewm(span=length, adjust=False).mean()
     ema2 = ema1.ewm(span=length, adjust=False).mean()
@@ -138,6 +149,10 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     enriched["trix"] = _trix(enriched["close"], 18)
     enriched["sar"] = _parabolic_sar(enriched["high"], enriched["low"], step=0.02, max_step=0.2)
     enriched["supertrend"] = _supertrend(enriched, length=10, multiplier=3.0)
+
+    scale = _feature_scale(enriched["close"], enriched["atr"], window=60)
+    enriched["feature_scale"] = scale
+    enriched["feature_scale_frac"] = (scale / enriched["close"]).replace([np.inf, -np.inf], np.nan)
 
     enriched = enriched.dropna().reset_index(drop=True)
     return enriched

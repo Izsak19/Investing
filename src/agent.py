@@ -104,8 +104,10 @@ class BanditAgent:
     @staticmethod
     def _sanitize(features: np.ndarray) -> np.ndarray:
         # why: indicators can spike; keep dot products numerically safe
-        return np.clip(np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0, copy=False),
-                       -config.FEATURE_CLIP, config.FEATURE_CLIP)
+        arr = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
+        scale = float(max(np.std(arr), 1e-6))
+        normalized = arr / scale
+        return np.clip(normalized, -config.FEATURE_CLIP, config.FEATURE_CLIP)
 
     def _clip_weights(self, weights: list[list[float]]) -> list[list[float]]:
         return np.clip(np.asarray(weights, dtype=float), -config.WEIGHT_CLIP, config.WEIGHT_CLIP).tolist()
@@ -223,9 +225,10 @@ class BanditAgent:
     ) -> tuple[str, np.ndarray, np.ndarray]:
         actions = allowed if allowed is not None else ACTIONS
         base = posterior_scale_override if posterior_scale_override is not None else self.posterior_scale
-        scale = max(base * self._half_life_decay(step), config.POSTERIOR_SCALE_MIN)
+        min_scale = max(config.POSTERIOR_SCALE_MIN, 1e-3)
+        scale = max(base * self._half_life_decay(step), min_scale)
         sampled, means = self._thompson_scores(features, scale=scale)
-        self.state.q_values = list(means)
+        self.state.q_values = list(sampled)
         self.state.last_epsilon = scale
 
         idxs = [ACTIONS.index(a) for a in actions]

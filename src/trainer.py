@@ -32,6 +32,7 @@ class Portfolio:
 @dataclass
 class StepResult:
     action: str
+    proposed_action: str
     trainer_reward: float
     scaled_reward: float
     trade_executed: bool
@@ -39,10 +40,15 @@ class StepResult:
     turnover_penalty: float
     refilled: bool
     realized_pnl: float
+    edge_margin: float
+    hold_reason: str | None
+    gate_blocked: bool = False
+    timing_blocked: bool = False
+    budget_blocked: bool = False
 
 @dataclass
 class TrainerState:
-    version: int = 2
+    version: int = 3
     run_id: str = ""
     steps: int = 0
     prev_price: float | None = None
@@ -62,6 +68,10 @@ class TrainerState:
     positive_steps: int = 0
     last_trade_step: int = -1
     last_entry_step: int = -1
+    gate_blocks: int = 0
+    timing_blocks: int = 0
+    budget_blocks: int = 0
+    penalty_profile: str = "train"
     def to_json(self, path: Path) -> None:
         atomic_write_json(path, asdict(self))
     @classmethod
@@ -76,13 +86,21 @@ class TrainerState:
 def build_features(row: pd.Series, portfolio: Portfolio) -> np.ndarray:
     price = float(row["close"])
     raw = row[INDICATOR_COLUMNS].to_numpy(dtype=float)
-    price_scale = max(price, 1e-6)
+    scale_frac = float(row.get("feature_scale_frac", 0.0))
+    feature_scale = float(row.get("feature_scale", 0.0))
+    if not math.isfinite(scale_frac):
+        scale_frac = 0.0
+    if not math.isfinite(feature_scale) or feature_scale <= 0:
+        feature_scale = 0.0
+    scale_guess = price * max(scale_frac, 0.01)
+    price_scale = max(feature_scale, scale_guess, 1e-6)
+    atr_scale = max(price_scale, feature_scale)
     vals: list[float] = []
     for col, v in zip(INDICATOR_COLUMNS, raw):
         if col in {"ma","ema","wma","boll_mid","boll_upper","boll_lower","vwap","sar","supertrend"}:
             vals.append((v - price) / price_scale)
         elif col == "atr":
-            vals.append(v / price_scale)
+            vals.append(v / max(atr_scale, 1e-6))
         elif col == "trix":
             vals.append(v / 100.0)
     pos_flag = 1.0 if portfolio.position > 0 else 0.0
@@ -95,8 +113,14 @@ def build_features(row: pd.Series, portfolio: Portfolio) -> np.ndarray:
     return np.clip(np.asarray(vals, dtype=float), -config.FEATURE_CLIP, config.FEATURE_CLIP)
 
 class Trainer:
-    def __init__(self, agent: BanditAgent, initial_cash: float = config.INITIAL_CASH,
-                 min_cash: float = config.MIN_TRAINING_CASH, timeframe: str | None = None):
+    def __init__(
+        self,
+        agent: BanditAgent,
+        initial_cash: float = config.INITIAL_CASH,
+        min_cash: float = config.MIN_TRAINING_CASH,
+        timeframe: str | None = None,
+        penalty_profile: str = "train",
+    ):
         self.agent = agent
         self.portfolio = Portfolio(cash=initial_cash)
         self.history: List[Tuple[int, str, float, float]] = []
@@ -123,6 +147,11 @@ class Trainer:
         self._turnover_window: deque[float] = deque(maxlen=config.TURNOVER_BUDGET_WINDOW)
         self.timeframe = timeframe or agent.state.timeframe or config.DEFAULT_TIMEFRAME
         self.periods_per_year = periods_per_year(self.timeframe)
+        self.penalty_profile = penalty_profile
+        self.gate_blocks = 0
+        self.timing_blocks = 0
+        self.budget_blocks = 0
+        self._hold_reason_log: list[tuple[int, str, str]] = []
 
     def reset_portfolio(self) -> None:
         """Reset portfolio and tracking buffers to their initial state."""
@@ -143,6 +172,10 @@ class Trainer:
         self.total_turnover_penalty_paid = 0.0
         self.sell_trades = 0
         self.winning_sells = 0
+        self.gate_blocks = 0
+        self.timing_blocks = 0
+        self.budget_blocks = 0
+        self._hold_reason_log.clear()
 
     # --- helpers --------------------------------------------------------------
 
@@ -246,27 +279,53 @@ class Trainer:
 
         features = build_features(row, self.portfolio)
         allowed_actions = ["hold"]
-        gap_ok = self.last_trade_step < 0 or (self.steps - self.last_trade_step) >= config.MIN_TRADE_GAP_STEPS
-        can_sell = (self.portfolio.position > 0) and gap_ok and (self.steps - self.last_entry_step) >= config.MIN_HOLD_STEPS
-        if can_sell:
-            allowed_actions.append("sell")
-        if self.portfolio.cash > 0 and gap_ok:
+        if self.portfolio.cash > 0:
             allowed_actions.append("buy")
+        if self.portfolio.position > 0:
+            allowed_actions.append("sell")
 
         action, sampled_scores, means = self.agent.act_with_scores(
             features, allowed=allowed_actions, step=self.steps, posterior_scale_override=posterior_scale_override
         )
 
-        # --- edge gate vs costs (use model means, not noisy samples) -----------
-        mean_buy = means[ACTIONS.index("buy")]
-        mean_hold = means[ACTIONS.index("hold")]
-        mean_sell = means[ACTIONS.index("sell")]
-        buy_margin = mean_buy - mean_hold
-        sell_margin = mean_sell - mean_hold
-        if action == "buy" and buy_margin < config.EDGE_THRESHOLD:
-            action = "hold"
-        if action == "sell" and sell_margin < config.EDGE_THRESHOLD:
-            action = "hold"
+        proposed_action = action
+        hold_idx = ACTIONS.index("hold")
+        buy_margin = sampled_scores[ACTIONS.index("buy")] - sampled_scores[hold_idx]
+        sell_margin = sampled_scores[ACTIONS.index("sell")] - sampled_scores[hold_idx]
+        edge_margin = buy_margin if proposed_action == "buy" else sell_margin if proposed_action == "sell" else 0.0
+
+        hold_reason: str | None = None
+        gate_blocked = False
+        timing_blocked = False
+        budget_blocked = False
+        warmup_active = self.agent.state.trades < config.WARMUP_TRADES_BEFORE_GATING
+
+        if not warmup_active:
+            if action == "buy" and buy_margin < config.EDGE_THRESHOLD:
+                action = "hold"
+                hold_reason = "gate"
+                gate_blocked = True
+                self.gate_blocks += 1
+            elif action == "sell" and sell_margin < config.EDGE_THRESHOLD:
+                action = "hold"
+                hold_reason = "gate"
+                gate_blocked = True
+                self.gate_blocks += 1
+
+        gap_ok = self.last_trade_step < 0 or (self.steps - self.last_trade_step) >= config.MIN_TRADE_GAP_STEPS
+        hold_ok = self.last_entry_step < 0 or (self.steps - self.last_entry_step) >= config.MIN_HOLD_STEPS
+
+        if not warmup_active:
+            if action == "buy" and not gap_ok:
+                action = "hold"
+                hold_reason = hold_reason or "timing_gap"
+                timing_blocked = True
+                self.timing_blocks += 1
+            if action == "sell" and (not gap_ok or not hold_ok):
+                action = "hold"
+                hold_reason = hold_reason or "timing_hold"
+                timing_blocked = True
+                self.timing_blocks += 1
 
         trade_executed = False
         fee_paid = 0.0
@@ -304,6 +363,8 @@ class Trainer:
                 self.last_entry_step = self.steps
             else:
                 action = "hold"
+                hold_reason = hold_reason or "budget"
+                budget_blocked = True
                 fee_paid = 0.0
                 turnover_penalty = 0.0
 
@@ -329,6 +390,16 @@ class Trainer:
                     # keep entry_value; basis unchanged for remaining units
                     pass
                 self.last_trade_step = self.steps
+            else:
+                action = "hold"
+                hold_reason = hold_reason or "budget"
+                budget_blocked = True
+
+        if budget_blocked:
+            self.budget_blocks += 1
+
+        if hold_reason:
+            self._hold_reason_log.append((self.steps, proposed_action, hold_reason))
 
         # --- reward & penalties ------------------------------------------------
         value_next = self.portfolio.value(price_next)
@@ -341,11 +412,16 @@ class Trainer:
         prospective_curve = self._equity_curve + [value_next]
         drawdown = compute_max_drawdown(prospective_curve)
         drawdown_over = max(0.0, drawdown - config.DRAWDOWN_BUDGET)
-        dd_penalty_value = drawdown_over * self.initial_cash * config.DRAWDOWN_PENALTY
+        penalties = config.PENALTY_PROFILES.get(
+            self.penalty_profile, config.PENALTY_PROFILES.get("train", {})
+        )
+        dd_penalty_rate = penalties.get("drawdown_penalty", config.DRAWDOWN_PENALTY)
+        to_penalty_rate = penalties.get("turnover_budget_penalty", config.TURNOVER_BUDGET_PENALTY)
+        dd_penalty_value = drawdown_over * self.initial_cash * dd_penalty_rate
 
         turnover_budget = self.initial_cash * config.TURNOVER_BUDGET_MULTIPLIER
         turnover_over = max(0.0, sum(self._turnover_window) - turnover_budget)
-        to_penalty_value = (turnover_over / max(turnover_budget, 1e-6)) * self.initial_cash * config.TURNOVER_BUDGET_PENALTY
+        to_penalty_value = (turnover_over / max(turnover_budget, 1e-6)) * self.initial_cash * to_penalty_rate
         risk_penalty_value = dd_penalty_value + to_penalty_value
 
         trainer_reward = reward - risk_penalty_value
@@ -371,6 +447,8 @@ class Trainer:
                 allowed_next=next_allowed,
             )
             self.history.append((step_idx, action, price_now, reward))
+        elif trade_executed:
+            self.agent.state.trades += 1
 
         self.total_steps += 1
         if trainer_reward > 0:
@@ -397,6 +475,12 @@ class Trainer:
             turnover_penalty=turnover_penalty,
             refilled=refilled,
             realized_pnl=realized_pnl,
+            proposed_action=proposed_action,
+            edge_margin=edge_margin,
+            hold_reason=hold_reason,
+            gate_blocked=gate_blocked,
+            timing_blocked=timing_blocked,
+            budget_blocked=budget_blocked,
         )
 
     # NOTE: run(), _flush_trades_and_metrics(), _persist_trades(), _persist_metrics(), _save_trainer_state()
@@ -440,6 +524,9 @@ class Trainer:
             "total_return": self.total_return,
             "total_fee_paid": self.total_fee_paid,
             "turnover_penalty_paid": self.total_turnover_penalty_paid,
+            "gate_blocks": self.gate_blocks,
+            "timing_blocks": self.timing_blocks,
+            "budget_blocks": self.budget_blocks,
             "data_is_live": data_is_live,
             "baseline_final_value": baseline_final_value,
             "val_final_value": val_final_value,
@@ -485,6 +572,10 @@ class Trainer:
             positive_steps=self.positive_steps,
             last_trade_step=self.last_trade_step,
             last_entry_step=self.last_entry_step,
+            gate_blocks=self.gate_blocks,
+            timing_blocks=self.timing_blocks,
+            budget_blocks=self.budget_blocks,
+            penalty_profile=self.penalty_profile,
         )
 
         target_dir = Path(run_dir)
@@ -612,6 +703,10 @@ def resume_from(run_dir: Path, agent: BanditAgent, trainer: Trainer) -> None:
         trainer.winning_sells = state.winning_sells
         trainer.last_trade_step = state.last_trade_step
         trainer.last_entry_step = state.last_entry_step
+        trainer.gate_blocks = state.gate_blocks
+        trainer.timing_blocks = state.timing_blocks
+        trainer.budget_blocks = state.budget_blocks
+        trainer.penalty_profile = state.penalty_profile or trainer.penalty_profile
         trainer.portfolio.cash = state.portfolio_cash
         trainer.portfolio.position = state.portfolio_position
         trainer.portfolio.entry_price = state.portfolio_entry_price
