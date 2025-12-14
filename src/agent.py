@@ -14,7 +14,12 @@ from src.indicators import INDICATOR_COLUMNS
 from src.persistence import atomic_write_json
 
 ACTIONS = ["sell", "hold", "buy"]
-FEATURE_COLUMNS = INDICATOR_COLUMNS + ["pos_flag", "cash_frac", "unrealized_ret", "bias", "pos_frac"]
+FEATURE_COLUMNS = INDICATOR_COLUMNS + [
+    "position_ratio",
+    "cash_ratio",
+    "unrealized_pnl",
+    "time_since_trade",
+]
 
 @dataclass
 class AgentState:

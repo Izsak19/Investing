@@ -92,33 +92,31 @@ class TrainerState:
         defaults.update(data)
         return cls(**defaults)
 
-def build_features(row: pd.Series, portfolio: Portfolio) -> np.ndarray:
+def build_features(row: pd.Series, portfolio: Portfolio, *, steps: int = 0, last_trade_step: int = -1) -> np.ndarray:
     price = float(row["close"])
     raw = row[INDICATOR_COLUMNS].to_numpy(dtype=float)
-    scale_frac = float(row.get("feature_scale_frac", 0.0))
-    feature_scale = float(row.get("feature_scale", 0.0))
-    if not math.isfinite(scale_frac):
-        scale_frac = 0.0
-    if not math.isfinite(feature_scale) or feature_scale <= 0:
-        feature_scale = 0.0
-    scale_guess = price * max(scale_frac, 0.01)
-    price_scale = max(feature_scale, scale_guess, 1e-6)
-    atr_scale = max(price_scale, feature_scale)
+
     vals: list[float] = []
     for col, v in zip(INDICATOR_COLUMNS, raw):
-        if col in {"ma","ema","wma","boll_mid","boll_upper","boll_lower","vwap","sar","supertrend"}:
-            vals.append((v - price) / price_scale)
-        elif col == "atr":
-            vals.append(v / max(atr_scale, 1e-6))
-        elif col == "trix":
-            vals.append(v / 100.0)
-    pos_flag = 1.0 if portfolio.position > 0 else 0.0
+        if col in {"ret_1m", "rv_1m", "rv1m_pct_5m", "spread_pct_5m", "tod_sin", "tod_cos"}:
+            vals.append(float(v))
+        elif col in {"rel_spread", "dw_spread", "basis_pct", "funding_x_time"}:
+            vals.append(float(v))
+        else:
+            # Flow/microstructure signals already volatility/volume normalised in compute_indicators
+            vals.append(float(v))
+
     portfolio_value = portfolio.value(price)
-    cash_frac = portfolio.cash / max(portfolio_value, 1e-6)
-    unrealized_ret = (price / portfolio.entry_price) - 1.0 if portfolio.position > 0 and portfolio.entry_price > 0 else 0.0
     position_value = portfolio.position * price
-    pos_frac = position_value / max(portfolio_value, 1e-6)
-    vals.extend([pos_flag, cash_frac, unrealized_ret, 1.0, pos_frac])
+    position_ratio = position_value / max(portfolio_value, 1e-6)
+    cash_ratio = portfolio.cash / max(portfolio_value, 1e-6)
+    unrealized_pnl = (price / portfolio.entry_price) - 1.0 if portfolio.position > 0 and portfolio.entry_price > 0 else 0.0
+    if last_trade_step < 0:
+        time_since_trade = 1.0
+    else:
+        time_since_trade = (steps - last_trade_step) / max(steps + 1, 1)
+
+    vals.extend([position_ratio, cash_ratio, unrealized_pnl, time_since_trade])
     return np.clip(np.asarray(vals, dtype=float), -config.FEATURE_CLIP, config.FEATURE_CLIP)
 
 class Trainer:
@@ -349,7 +347,7 @@ class Trainer:
         price_next = float(next_row["close"])
         refilled = self._maybe_refill_portfolio(price_now)
 
-        features = build_features(row, self.portfolio)
+        features = build_features(row, self.portfolio, steps=self.steps, last_trade_step=self.last_trade_step)
         allowed_actions = ["hold"]
         if self.portfolio.cash > 0:
             allowed_actions.append("buy")
@@ -521,8 +519,6 @@ class Trainer:
         value_next = self.portfolio.value(price_next)
         self._log_action(action)
         reward = value_next - value_before
-        step_return = reward / max(value_before, 1e-6)
-        self._return_history.append(step_return)
         self._turnover_window.append(notional_traded)
         self._update_adaptive_risk_controls()
 
@@ -542,11 +538,22 @@ class Trainer:
         risk_penalty_value = dd_penalty_value + to_penalty_value
 
         trainer_reward = reward - risk_penalty_value
-        pct = trainer_reward / max(self.initial_cash, 1e-6)
-        scaled_reward = math.tanh(pct * self.reward_scale)
+        step_return = trainer_reward / max(value_before, 1e-6)
+        self._return_history.append(step_return)
+
+        # Blend absolute return with a volatility-normalised component to stabilise learning.
+        history_arr = np.asarray(self._return_history, dtype=float)
+        vol_window = history_arr[-config.REWARD_STABILITY_WINDOW :]
+        inst_vol = float(np.std(vol_window)) if vol_window.size >= config.REWARD_STABILITY_MIN_OBS else 0.0
+        stability_scale = max(inst_vol, config.ADAPTIVE_TARGET_RETURN_VOL, 1e-6)
+        risk_adjusted = step_return / stability_scale
+        blend = ((1.0 - config.REWARD_RISK_BLEND) * step_return) + (config.REWARD_RISK_BLEND * risk_adjusted)
+        scaled_reward = math.tanh(blend * self.reward_scale)
 
         # --- learning ---------------------------------------------------------
-        next_features = build_features(next_row, self.portfolio)
+        next_features = build_features(
+            next_row, self.portfolio, steps=self.steps + 1, last_trade_step=self.last_trade_step
+        )
         next_allowed = ["hold"]
         if self.portfolio.position > 0:
             next_allowed.append("sell")
@@ -568,7 +575,7 @@ class Trainer:
             self.agent.state.trades += 1
 
         self.total_steps += 1
-        if trainer_reward > 0:
+        if blend > 0:
             self.positive_steps += 1
         self.steps += 1
         self.total_fee_paid += fee_paid
