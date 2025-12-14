@@ -20,6 +20,11 @@ from src.metrics import compute_max_drawdown, compute_sharpe_ratio, total_return
 from src.persistence import atomic_write_json
 from src.timeframe import periods_per_year
 
+
+def _clamp(value: float, min_value: float, max_value: float) -> float:
+    return max(min_value, min(max_value, value))
+
+
 @dataclass
 class Portfolio:
     cash: float = 1000.0
@@ -49,7 +54,7 @@ class StepResult:
 
 @dataclass
 class TrainerState:
-    version: int = 3
+    version: int = 4
     run_id: str = ""
     steps: int = 0
     prev_price: float | None = None
@@ -73,6 +78,9 @@ class TrainerState:
     timing_blocks: int = 0
     budget_blocks: int = 0
     penalty_profile: str = "train"
+    reward_scale: float = config.REWARD_SCALE
+    drawdown_budget: float = config.DRAWDOWN_BUDGET
+    turnover_budget_multiplier: float = config.TURNOVER_BUDGET_MULTIPLIER
     def to_json(self, path: Path) -> None:
         atomic_write_json(path, asdict(self))
     @classmethod
@@ -153,6 +161,10 @@ class Trainer:
         self.timing_blocks = 0
         self.budget_blocks = 0
         self._hold_reason_log: list[tuple[int, str, str]] = []
+        # adaptive knobs (start from config values)
+        self.reward_scale = config.REWARD_SCALE
+        self.drawdown_budget = config.DRAWDOWN_BUDGET
+        self.turnover_budget_multiplier = config.TURNOVER_BUDGET_MULTIPLIER
 
     def reset_portfolio(self) -> None:
         """Reset portfolio and tracking buffers to their initial state."""
@@ -177,6 +189,9 @@ class Trainer:
         self.timing_blocks = 0
         self.budget_blocks = 0
         self._hold_reason_log.clear()
+        self.reward_scale = config.REWARD_SCALE
+        self.drawdown_budget = config.DRAWDOWN_BUDGET
+        self.turnover_budget_multiplier = config.TURNOVER_BUDGET_MULTIPLIER
 
     # --- helpers --------------------------------------------------------------
 
@@ -188,6 +203,43 @@ class Trainer:
                 del self._action_counter[oldest]
         self._recent_actions.append(action)
         self._action_counter[action] += 1
+
+    def _update_adaptive_risk_controls(self) -> None:
+        if not config.ADAPTIVE_REWARD_SCALE:
+            return
+        returns = np.asarray(self._return_history, dtype=float)
+        min_obs = max(25, config.RETURN_HISTORY_WINDOW // 4)
+        if len(returns) < min_obs:
+            return
+
+        # scale reward to keep tanh input in a useful range and respond to performance
+        vol = float(np.std(returns))
+        sharpe = compute_sharpe_ratio(returns, periods_per_year=self.periods_per_year)
+        target_vol = max(config.ADAPTIVE_TARGET_RETURN_VOL, 1e-6)
+        vol_adj = _clamp(target_vol / max(vol, 1e-6), 0.5, 2.5)
+        desired_reward_scale = config.REWARD_SCALE * vol_adj
+
+        if sharpe < config.ADAPTIVE_SHARPE_SOFT:
+            desired_reward_scale *= 0.9
+        elif sharpe > config.ADAPTIVE_SHARPE_STRONG:
+            desired_reward_scale *= 1.1
+
+        mix = _clamp(config.ADAPTIVE_REWARD_DECAY, 0.0, 1.0)
+        self.reward_scale = (1 - mix) * self.reward_scale + mix * desired_reward_scale
+        self.reward_scale = _clamp(self.reward_scale, config.REWARD_SCALE_MIN, config.REWARD_SCALE_MAX)
+
+        # adapt risk budgets with a soft performance score
+        perf_score = math.tanh(sharpe)
+        dd_target = config.DRAWDOWN_BUDGET * (1 + perf_score * config.ADAPTIVE_RISK_RANGE)
+        to_target = config.TURNOVER_BUDGET_MULTIPLIER * (1 + 0.6 * perf_score * config.ADAPTIVE_RISK_RANGE)
+
+        self.drawdown_budget = (1 - mix) * self.drawdown_budget + mix * dd_target
+        self.turnover_budget_multiplier = (1 - mix) * self.turnover_budget_multiplier + mix * to_target
+
+        self.drawdown_budget = _clamp(self.drawdown_budget, config.DRAWDOWN_BUDGET_MIN, config.DRAWDOWN_BUDGET_MAX)
+        self.turnover_budget_multiplier = _clamp(
+            self.turnover_budget_multiplier, config.TURNOVER_BUDGET_MIN, config.TURNOVER_BUDGET_MAX
+        )
 
     def _stuck_adaptation(self, posterior_scale_override: float | None) -> tuple[float | None, float, bool]:
         if not config.ENABLE_STUCK_UNFREEZE:
@@ -455,10 +507,11 @@ class Trainer:
         step_return = reward / max(value_before, 1e-6)
         self._return_history.append(step_return)
         self._turnover_window.append(notional_traded)
+        self._update_adaptive_risk_controls()
 
         prospective_curve = self._equity_curve + [value_next]
         drawdown = compute_max_drawdown(prospective_curve)
-        drawdown_over = max(0.0, drawdown - config.DRAWDOWN_BUDGET)
+        drawdown_over = max(0.0, drawdown - self.drawdown_budget)
         penalties = config.PENALTY_PROFILES.get(
             self.penalty_profile, config.PENALTY_PROFILES.get("train", {})
         )
@@ -466,14 +519,14 @@ class Trainer:
         to_penalty_rate = penalties.get("turnover_budget_penalty", config.TURNOVER_BUDGET_PENALTY)
         dd_penalty_value = drawdown_over * self.initial_cash * dd_penalty_rate
 
-        turnover_budget = self.initial_cash * config.TURNOVER_BUDGET_MULTIPLIER
+        turnover_budget = self.initial_cash * self.turnover_budget_multiplier
         turnover_over = max(0.0, sum(self._turnover_window) - turnover_budget)
         to_penalty_value = (turnover_over / max(turnover_budget, 1e-6)) * self.initial_cash * to_penalty_rate
         risk_penalty_value = dd_penalty_value + to_penalty_value
 
         trainer_reward = reward - risk_penalty_value
         pct = trainer_reward / max(self.initial_cash, 1e-6)
-        scaled_reward = math.tanh(pct * config.REWARD_SCALE)
+        scaled_reward = math.tanh(pct * self.reward_scale)
 
         # --- learning ---------------------------------------------------------
         next_features = build_features(next_row, self.portfolio)
@@ -580,6 +633,9 @@ class Trainer:
             "val_final_value": val_final_value,
             "ma_baseline_final_value": ma_baseline_final_value,
             "executed_trades": executed_trades if executed_trades is not None else len(self.history),
+            "reward_scale": self.reward_scale,
+            "drawdown_budget": self.drawdown_budget,
+            "turnover_budget_multiplier": self.turnover_budget_multiplier,
         }
         path = run_dir / "metrics.json"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -624,6 +680,9 @@ class Trainer:
             timing_blocks=self.timing_blocks,
             budget_blocks=self.budget_blocks,
             penalty_profile=self.penalty_profile,
+            reward_scale=self.reward_scale,
+            drawdown_budget=self.drawdown_budget,
+            turnover_budget_multiplier=self.turnover_budget_multiplier,
         )
 
         target_dir = Path(run_dir)
@@ -755,6 +814,9 @@ def resume_from(run_dir: Path, agent: BanditAgent, trainer: Trainer) -> None:
         trainer.timing_blocks = state.timing_blocks
         trainer.budget_blocks = state.budget_blocks
         trainer.penalty_profile = state.penalty_profile or trainer.penalty_profile
+        trainer.reward_scale = state.reward_scale
+        trainer.drawdown_budget = state.drawdown_budget
+        trainer.turnover_budget_multiplier = state.turnover_budget_multiplier
         trainer.portfolio.cash = state.portfolio_cash
         trainer.portfolio.position = state.portfolio_position
         trainer.portfolio.entry_price = state.portfolio_entry_price
