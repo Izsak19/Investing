@@ -20,9 +20,9 @@ def compute_max_drawdown(equity_curve: Sequence[float]) -> float:
 
 
 def compute_sharpe_ratio(returns: Sequence[float], *, periods_per_year: float | None = None) -> float:
-    if not returns:
-        return 0.0
     arr = np.asarray(returns, dtype=float)
+    if arr.size == 0:
+        return 0.0
     mean = float(np.mean(arr))
     std = float(np.std(arr))
     if std <= 0:
