@@ -29,8 +29,21 @@ INDICATOR_COLUMNS = [
 ]
 
 
-def _safe_divide(numer: pd.Series, denom: pd.Series, *, fallback: float = 0.0) -> pd.Series:
-    ratio = numer / denom.replace(0, np.nan)
+def _safe_divide(numer: pd.Series, denom: pd.Series | float | int, *, fallback: float = 0.0) -> pd.Series:
+    """Divide two series while gracefully handling zeros and scalars.
+
+    When ``denom`` is a scalar, broadcast it to match the shape of ``numer`` so
+    ``replace`` can be called safely. Any infinities or NaNs produced by the
+    division are replaced with the provided ``fallback`` value.
+    """
+
+    numer_series = numer if isinstance(numer, pd.Series) else pd.Series(numer)
+    if isinstance(denom, pd.Series):
+        denom_series = denom
+    else:
+        denom_series = pd.Series(denom, index=numer_series.index)
+
+    ratio = numer_series / denom_series.replace(0, np.nan)
     return ratio.replace([np.inf, -np.inf], np.nan).fillna(fallback)
 
 
