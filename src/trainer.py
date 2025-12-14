@@ -107,32 +107,26 @@ class TrainerState:
 
 def build_features(row: pd.Series, portfolio: Portfolio) -> np.ndarray:
     price = float(row["close"])
-    raw = row[INDICATOR_COLUMNS].to_numpy(dtype=float)
-    scale_frac = float(row.get("feature_scale_frac", 0.0))
-    feature_scale = float(row.get("feature_scale", 0.0))
-    if not math.isfinite(scale_frac):
-        scale_frac = 0.0
-    if not math.isfinite(feature_scale) or feature_scale <= 0:
-        feature_scale = 0.0
-    scale_guess = price * max(scale_frac, 0.01)
-    price_scale = max(feature_scale, scale_guess, 1e-6)
-    atr_scale = max(price_scale, feature_scale)
-    vals: list[float] = []
-    for col, v in zip(INDICATOR_COLUMNS, raw):
-        if col in {"ma","ema","wma","boll_mid","boll_upper","boll_lower","vwap","sar","supertrend"}:
-            vals.append((v - price) / price_scale)
-        elif col == "atr":
-            vals.append(v / max(atr_scale, 1e-6))
-        elif col == "trix":
-            vals.append(v / 100.0)
-    pos_flag = 1.0 if portfolio.position > 0 else 0.0
+    indicator_values = np.nan_to_num(
+        row[INDICATOR_COLUMNS].to_numpy(dtype=float), nan=0.0, posinf=0.0, neginf=0.0
+    )
+
     portfolio_value = portfolio.value(price)
     cash_frac = portfolio.cash / max(portfolio_value, 1e-6)
-    unrealized_ret = (price / portfolio.entry_price) - 1.0 if portfolio.position > 0 and portfolio.entry_price > 0 else 0.0
+    unrealized_ret = (
+        (price / portfolio.entry_price) - 1.0 if portfolio.position > 0 and portfolio.entry_price > 0 else 0.0
+    )
     position_value = portfolio.position * price
     pos_frac = position_value / max(portfolio_value, 1e-6)
-    vals.extend([pos_flag, cash_frac, unrealized_ret, 1.0, pos_frac])
-    return np.clip(np.asarray(vals, dtype=float), -config.FEATURE_CLIP, config.FEATURE_CLIP)
+    time_since_trade = float(row.get("time_since_trade", 0.0))
+
+    features = np.concatenate(
+        [
+            indicator_values,
+            [pos_frac, cash_frac, unrealized_ret, time_since_trade],
+        ]
+    )
+    return np.clip(features, -config.FEATURE_CLIP, config.FEATURE_CLIP)
 
 class Trainer:
     def __init__(
