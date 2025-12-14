@@ -131,6 +131,18 @@ PROFILES = {
         "TURNOVER_BUDGET_PENALTY": 0.22,
         "POSITION_FRACTION_MIN": 0.06,
     },
+
+    "cold_start_trades": {
+        "POSTERIOR_SCALE": 0.6,                 # bigger Thompson noise early
+        "POSTERIOR_DECAY_HALF_LIFE_STEPS": 5_000,
+        "POSTERIOR_SCALE_MIN": 0.1,
+        "EDGE_THRESHOLD": 0.0005,               # keep in tanh space
+        "WARMUP_TRADES_BEFORE_GATING": 0,       # don't suppress edges at start
+        "MIN_HOLD_STEPS": 0,
+        "MIN_TRADE_GAP_STEPS": 0,
+        # Optional for debugging: avoid silent resets while inspecting P&L
+        # "MIN_TRAINING_CASH": 0.0,
+    }
 }
 
 

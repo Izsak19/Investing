@@ -440,26 +440,40 @@ class Trainer:
         if action == "buy" and cash_before > 0:
             pos_frac = self._dynamic_fraction(buy_margin)
             trade_cash = cash_before * pos_frac
+
+            # penalties applied ONCE by shrinking shares (keep cash outlay = trade_cash)
             fee_paid = trade_cash * config.FEE_RATE
-            investable_base = trade_cash - fee_paid
-            turnover_penalty = investable_base * config.TURNOVER_PENALTY
-            investable = investable_base - turnover_penalty
-            gross_outlay = trade_cash
-            if investable > 0 and gross_outlay <= cash_before:
+            turnover_penalty = trade_cash * config.TURNOVER_PENALTY
+            investable = trade_cash - fee_paid - turnover_penalty
+            cash_outlay = trade_cash  # <-- no "+ turnover_penalty" here
+
+            if investable > 0 and cash_outlay <= cash_before:
                 trade_executed = True
-                notional_traded = gross_outlay
+                notional_traded = trade_cash  # for turnover stats
                 trade_size = investable / price_now
+
                 prior_pos = self.portfolio.position
                 prior_cost = prior_pos * self.portfolio.entry_price
                 new_pos = prior_pos + trade_size
-                total_cost = prior_cost + gross_outlay
-                self.portfolio.entry_price = total_cost / max(new_pos, 1e-9)  # why: track fee-adjusted basis
+
+                # basis tracks actual cash spent this leg (trade_cash)
+                total_cost = prior_cost + cash_outlay
+                self.portfolio.entry_price = total_cost / max(new_pos, 1e-9)
+
                 self.portfolio.position = new_pos
-                self.portfolio.cash = cash_before - gross_outlay
+                self.portfolio.cash = cash_before - cash_outlay
+
                 if prior_pos == 0:
                     self.portfolio.entry_value = value_before
+
                 self.last_trade_step = self.steps
                 self.last_entry_step = self.steps
+
+                # DEBUG (optional): verify the immediate MTM impact of this BUY
+                # Why: catches any hidden re-charges or double counting early.
+                expected_impact = -(fee_paid + turnover_penalty)
+                if abs(trade_impact - expected_impact) > 1e-6:
+                    print(f"[warn] buy impact mismatch: got {trade_impact:.6f}, expected {expected_impact:.6f}")
             else:
                 action = "hold"
                 hold_reason = hold_reason or "budget"
