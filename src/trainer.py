@@ -317,8 +317,11 @@ class Trainer:
 
         proposed_action = action
         hold_idx = ACTIONS.index("hold")
-        buy_margin = sampled_scores[ACTIONS.index("buy")] - sampled_scores[hold_idx]
-        sell_margin = sampled_scores[ACTIONS.index("sell")] - sampled_scores[hold_idx]
+        margin_scale = max(len(INDICATOR_COLUMNS) * config.WEIGHT_CLIP, 1e-9)
+        buy_margin_raw = sampled_scores[ACTIONS.index("buy")] - sampled_scores[hold_idx]
+        sell_margin_raw = sampled_scores[ACTIONS.index("sell")] - sampled_scores[hold_idx]
+        buy_margin = math.tanh(buy_margin_raw / margin_scale)
+        sell_margin = math.tanh(sell_margin_raw / margin_scale)
         edge_margin = buy_margin if proposed_action == "buy" else sell_margin if proposed_action == "sell" else 0.0
 
         hold_reason: str | None = None
