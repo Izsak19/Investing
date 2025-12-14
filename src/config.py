@@ -65,6 +65,9 @@ ADAPTIVE_REWARD_DECAY = 0.15       # smoothing factor for updates
 ADAPTIVE_TARGET_RETURN_VOL = 0.0025  # target daily-ish volatility for tanh scaling
 ADAPTIVE_SHARPE_SOFT = 0.25
 ADAPTIVE_SHARPE_STRONG = 1.0
+REWARD_RISK_BLEND = 0.45           # mix between raw return and volatility-normalised score
+REWARD_STABILITY_WINDOW = 60       # how many recent steps to use for local volatility estimate
+REWARD_STABILITY_MIN_OBS = 12
 
 DRAWDOWN_BUDGET = 0.12
 DRAWDOWN_BUDGET_MIN = 0.08
