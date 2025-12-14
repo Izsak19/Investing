@@ -43,6 +43,7 @@ class StepResult:
     trade_executed: bool
     fee_paid: float
     turnover_penalty: float
+    slippage_paid: float
     refilled: bool
     realized_pnl: float
     edge_margin: float
@@ -54,7 +55,7 @@ class StepResult:
 
 @dataclass
 class TrainerState:
-    version: int = 4
+    version: int = 5
     run_id: str = ""
     steps: int = 0
     prev_price: float | None = None
@@ -62,6 +63,13 @@ class TrainerState:
     refill_count: int = 0
     total_fee_paid: float = 0.0
     total_turnover_penalty_paid: float = 0.0
+    total_slippage_paid: float = 0.0
+    # decision_count is total_steps; executed_trade_count counts only actual fills
+    executed_trade_count: int = 0
+    buy_legs: int = 0
+    sell_legs: int = 0
+    winning_sell_legs: int = 0
+    # legacy fields kept for backwards compatibility (older dashboards/state)
     total_trades: int = 0
     successful_trades: int = 0
     sell_trades: int = 0
@@ -81,6 +89,11 @@ class TrainerState:
     reward_scale: float = config.REWARD_SCALE
     drawdown_budget: float = config.DRAWDOWN_BUDGET
     turnover_budget_multiplier: float = config.TURNOVER_BUDGET_MULTIPLIER
+    # reward normalization / shaping state (persisted for resume)
+    reward_baseline_ema: float = 0.0
+    reward_var_ema: float = config.REWARD_VAR_INIT
+    prob_alpha: float = config.PROB_SHAPING_ALPHA0
+    prob_beta: float = config.PROB_SHAPING_BETA0
     def to_json(self, path: Path) -> None:
         atomic_write_json(path, asdict(self))
     @classmethod
@@ -141,6 +154,13 @@ class Trainer:
         self.refill_count = 0
         self.total_fee_paid = 0.0
         self.total_turnover_penalty_paid = 0.0
+        self.total_slippage_paid = 0.0
+        # execution / leg counters (separate from decisions)
+        self.executed_trade_count = 0
+        self.buy_legs = 0
+        self.sell_legs = 0
+        self.winning_sell_legs = 0
+        # legacy counters (kept for compatibility)
         self.steps = 0
         self.sell_trades = 0
         self.winning_sells = 0
@@ -165,6 +185,10 @@ class Trainer:
         self.reward_scale = config.REWARD_SCALE
         self.drawdown_budget = config.DRAWDOWN_BUDGET
         self.turnover_budget_multiplier = config.TURNOVER_BUDGET_MULTIPLIER
+        self._reward_baseline = 0.0
+        self._reward_var_ema = float(config.REWARD_VAR_INIT)
+        self._prob_alpha = float(config.PROB_SHAPING_ALPHA0)
+        self._prob_beta = float(config.PROB_SHAPING_BETA0)
 
     def reset_portfolio(self) -> None:
         """Reset portfolio and tracking buffers to their initial state."""
@@ -183,6 +207,11 @@ class Trainer:
         self.positive_steps = 0
         self.total_fee_paid = 0.0
         self.total_turnover_penalty_paid = 0.0
+        self.total_slippage_paid = 0.0
+        self.executed_trade_count = 0
+        self.buy_legs = 0
+        self.sell_legs = 0
+        self.winning_sell_legs = 0
         self.sell_trades = 0
         self.winning_sells = 0
         self.gate_blocks = 0
@@ -192,6 +221,10 @@ class Trainer:
         self.reward_scale = config.REWARD_SCALE
         self.drawdown_budget = config.DRAWDOWN_BUDGET
         self.turnover_budget_multiplier = config.TURNOVER_BUDGET_MULTIPLIER
+        self._reward_baseline = 0.0
+        self._reward_var_ema = float(config.REWARD_VAR_INIT)
+        self._prob_alpha = float(config.PROB_SHAPING_ALPHA0)
+        self._prob_beta = float(config.PROB_SHAPING_BETA0)
 
     # --- helpers --------------------------------------------------------------
 
@@ -305,6 +338,9 @@ class Trainer:
 
     @property
     def trade_win_rate(self) -> float:
+        # Prefer per-sell-leg win rate (works with partial sells). Falls back to legacy.
+        if getattr(self, 'sell_legs', 0) > 0:
+            return float(getattr(self, 'winning_sell_legs', 0)) / max(1, int(getattr(self, 'sell_legs', 0)))
         return self.winning_sells / max(1, self.sell_trades)
 
     @property
@@ -382,13 +418,22 @@ class Trainer:
         budget_blocked = False
         warmup_active = self.agent.state.trades < config.WARMUP_TRADES_BEFORE_GATING
 
+        # --- cost-aware gating -------------------------------------------------
+        # 1m data is very fee/slippage sensitive. Require edge to beat estimated
+        # all-in costs (in tanh-space) before allowing BUY/SELL.
+        if config.COST_AWARE_GATING:
+            est_cost = config.FEE_RATE + config.TURNOVER_PENALTY + config.SLIPPAGE_RATE + config.GATE_SAFETY_MARGIN
+            cost_edge = max(edge_threshold, config.COST_EDGE_MULT * est_cost + config.EDGE_SAFETY_MARGIN)
+        else:
+            cost_edge = edge_threshold
+
         if not warmup_active:
-            if action == "buy" and buy_margin < edge_threshold:
+            if action == "buy" and buy_margin < cost_edge:
                 action = "hold"
                 hold_reason = "gate"
                 gate_blocked = True
                 self.gate_blocks += 1
-            elif action == "sell" and sell_margin < edge_threshold:
+            elif action == "sell" and sell_margin < cost_edge:
                 action = "hold"
                 hold_reason = "gate"
                 gate_blocked = True
@@ -412,6 +457,7 @@ class Trainer:
         trade_executed = False
         fee_paid = 0.0
         turnover_penalty = 0.0
+        slippage_paid = 0.0
         realized_pnl = 0.0
         notional_traded = 0.0
 
@@ -444,7 +490,8 @@ class Trainer:
             # penalties applied ONCE by shrinking shares (keep cash outlay = trade_cash)
             fee_paid = trade_cash * config.FEE_RATE
             turnover_penalty = trade_cash * config.TURNOVER_PENALTY
-            investable = trade_cash - fee_paid - turnover_penalty
+            slippage_paid = trade_cash * config.SLIPPAGE_RATE
+            investable = trade_cash - fee_paid - turnover_penalty - slippage_paid
             cash_outlay = trade_cash  # <-- no "+ turnover_penalty" here
 
             if investable > 0 and cash_outlay <= cash_before:
@@ -492,8 +539,9 @@ class Trainer:
                 gross_proceeds = trade_size * price_now
                 fee_paid = gross_proceeds * config.FEE_RATE
                 turnover_penalty = gross_proceeds * config.TURNOVER_PENALTY
+                slippage_paid = gross_proceeds * config.SLIPPAGE_RATE
                 notional_traded = gross_proceeds
-                net = gross_proceeds - fee_paid - turnover_penalty
+                net = gross_proceeds - fee_paid - turnover_penalty - slippage_paid
                 self.portfolio.cash += net
                 self.portfolio.position = position_before - trade_size
                 fully_closed = self.portfolio.position <= 1e-12
@@ -542,8 +590,50 @@ class Trainer:
         risk_penalty_value = dd_penalty_value + to_penalty_value
 
         trainer_reward = reward - risk_penalty_value
+
+        # ---- Improved reward strategy (bounded + variance-reduced) -----------
+        # 1) convert to pct-of-initial-cash (stable scale)
         pct = trainer_reward / max(self.initial_cash, 1e-6)
-        scaled_reward = math.tanh(pct * self.reward_scale)
+
+        # 2) advantage baseline (EMA) to reduce variance; does not change optimum
+        if config.USE_ADVANTAGE_BASELINE:
+            decay = _clamp(config.BASELINE_EMA_DECAY, 0.0, 1.0)
+            self._reward_baseline = (1 - decay) * self._reward_baseline + decay * pct
+        advantage = pct - (self._reward_baseline if config.USE_ADVANTAGE_BASELINE else 0.0)
+
+        # 3) normalize by an EMA of advantage variance (stabilizes posterior updates)
+        if config.USE_REWARD_STD_NORMALIZATION:
+            decay = _clamp(config.BASELINE_EMA_DECAY, 0.0, 1.0)
+            self._reward_var_ema = (1 - decay) * self._reward_var_ema + decay * (advantage * advantage)
+            sigma = math.sqrt(max(self._reward_var_ema, config.REWARD_SIGMA_FLOOR ** 2))
+            advantage = advantage / sigma
+
+        # 4) bound the learning signal to [-1,1] via tanh, with input clipping
+        tanh_in = advantage * self.reward_scale
+        tanh_in = _clamp(tanh_in, -config.REWARD_TANH_INPUT_CLIP, config.REWARD_TANH_INPUT_CLIP)
+
+        # 5) optional probabilistic shaping noise (zero-mean, decays with steps)
+        if config.ENABLE_PROB_SHAPING and self.reward_scale > 0:
+            # decay alpha/beta counts slowly to avoid locking-in early noise patterns
+            cdec = _clamp(config.PROB_SHAPING_COUNT_DECAY, 0.0, 1.0)
+            self._prob_alpha = (1 - cdec) * self._prob_alpha + cdec * config.PROB_SHAPING_ALPHA0
+            self._prob_beta = (1 - cdec) * self._prob_beta + cdec * config.PROB_SHAPING_BETA0
+            # update counts with the sign of the *true* trainer reward (not action-dependent)
+            if trainer_reward > 0:
+                self._prob_alpha = min(self._prob_alpha + 1.0, config.PROB_SHAPING_MAX_COUNT)
+            elif trainer_reward < 0:
+                self._prob_beta = min(self._prob_beta + 1.0, config.PROB_SHAPING_MAX_COUNT)
+            # sample exploration noise and re-center to zero mean
+            a = max(self._prob_alpha, 1e-6)
+            b = max(self._prob_beta, 1e-6)
+            p = float(np.random.beta(a, b))
+            centered = p - (a / (a + b))
+            # step-based decay so shaping fades out
+            hl = max(1.0, float(config.PROB_SHAPING_HALF_LIFE_STEPS))
+            amp = config.PROB_SHAPING_TANH_AMPLITUDE * (0.5 ** (self.steps / hl))
+            tanh_in = tanh_in + _clamp(centered, -0.5, 0.5) * 2.0 * amp
+
+        scaled_reward = math.tanh(tanh_in)
 
         # --- learning ---------------------------------------------------------
         next_features = build_features(next_row, self.portfolio)
@@ -573,8 +663,22 @@ class Trainer:
         self.steps += 1
         self.total_fee_paid += fee_paid
         self.total_turnover_penalty_paid += turnover_penalty
+        self.total_slippage_paid += slippage_paid
         self._equity_curve.append(value_next)
 
+        # execution counters and per-leg win-rate accounting
+        if trade_executed:
+            self.executed_trade_count += 1
+            if action == "buy":
+                self.buy_legs += 1
+            elif action == "sell":
+                self.sell_legs += 1
+                # per-leg PnL: compare price_now to entry_price for the size sold
+                leg_pnl = (price_now - self.portfolio.entry_price) * (notional_traded / max(price_now, 1e-9))
+                if leg_pnl > 0:
+                    self.winning_sell_legs += 1
+
+        # legacy full-close sell win rate (kept for backward compatibility)
         if action == "sell" and trade_executed:
             self.sell_trades += 1
             if realized_pnl > 0:
@@ -590,6 +694,7 @@ class Trainer:
             trade_executed=trade_executed,
             fee_paid=fee_paid,
             turnover_penalty=turnover_penalty,
+            slippage_paid=slippage_paid,
             refilled=refilled,
             realized_pnl=realized_pnl,
             proposed_action=proposed_action,
@@ -642,6 +747,7 @@ class Trainer:
             "total_return": self.total_return,
             "total_fee_paid": self.total_fee_paid,
             "turnover_penalty_paid": self.total_turnover_penalty_paid,
+            "slippage_paid": getattr(self, 'total_slippage_paid', 0.0),
             "gate_blocks": self.gate_blocks,
             "timing_blocks": self.timing_blocks,
             "budget_blocks": self.budget_blocks,
@@ -649,7 +755,16 @@ class Trainer:
             "baseline_final_value": baseline_final_value,
             "val_final_value": val_final_value,
             "ma_baseline_final_value": ma_baseline_final_value,
-            "executed_trades": executed_trades if executed_trades is not None else len(self.history),
+            # decision_count is total_steps; executed_trade_count counts only actual fills
+            "decision_count": self.total_steps,
+            "executed_trade_count": int(getattr(self, 'executed_trade_count', 0)),
+            "buy_legs": int(getattr(self, 'buy_legs', 0)),
+            "sell_legs": int(getattr(self, 'sell_legs', 0)),
+            "winning_sell_legs": int(getattr(self, 'winning_sell_legs', 0)),
+            "avg_notional_per_trade": (sum(self._turnover_window) / max(1, int(getattr(self, 'executed_trade_count', 0)))) if int(getattr(self, 'executed_trade_count', 0)) > 0 else 0.0,
+            "turnover_per_1000_steps": (sum(self._turnover_window) / max(1, self.total_steps)) * 1000.0,
+            # legacy field name kept (now uses executed_trade_count by default)
+            "executed_trades": executed_trades if executed_trades is not None else int(getattr(self, 'executed_trade_count', 0)),
             "reward_scale": self.reward_scale,
             "drawdown_budget": self.drawdown_budget,
             "turnover_budget_multiplier": self.turnover_budget_multiplier,
@@ -681,6 +796,12 @@ class Trainer:
             refill_count=self.refill_count,
             total_fee_paid=self.total_fee_paid,
             total_turnover_penalty_paid=self.total_turnover_penalty_paid,
+            total_slippage_paid=getattr(self, 'total_slippage_paid', 0.0),
+            executed_trade_count=int(getattr(self, 'executed_trade_count', 0)),
+            buy_legs=int(getattr(self, 'buy_legs', 0)),
+            sell_legs=int(getattr(self, 'sell_legs', 0)),
+            winning_sell_legs=int(getattr(self, 'winning_sell_legs', 0)),
+            # legacy fields
             total_trades=len(self.history),
             successful_trades=self.winning_sells,
             sell_trades=self.sell_trades,
@@ -700,6 +821,10 @@ class Trainer:
             reward_scale=self.reward_scale,
             drawdown_budget=self.drawdown_budget,
             turnover_budget_multiplier=self.turnover_budget_multiplier,
+            reward_baseline_ema=self._reward_baseline,
+            reward_var_ema=self._reward_var_ema,
+            prob_alpha=self._prob_alpha,
+            prob_beta=self._prob_beta,
         )
 
         target_dir = Path(run_dir)
@@ -823,6 +948,11 @@ def resume_from(run_dir: Path, agent: BanditAgent, trainer: Trainer) -> None:
         trainer.refill_count = state.refill_count
         trainer.total_fee_paid = state.total_fee_paid
         trainer.total_turnover_penalty_paid = state.total_turnover_penalty_paid
+        trainer.total_slippage_paid = float(getattr(state, 'total_slippage_paid', 0.0))
+        trainer.executed_trade_count = int(getattr(state, 'executed_trade_count', 0))
+        trainer.buy_legs = int(getattr(state, 'buy_legs', 0))
+        trainer.sell_legs = int(getattr(state, 'sell_legs', 0))
+        trainer.winning_sell_legs = int(getattr(state, 'winning_sell_legs', 0))
         trainer.sell_trades = state.sell_trades
         trainer.winning_sells = state.winning_sells
         trainer.last_trade_step = state.last_trade_step
@@ -840,5 +970,10 @@ def resume_from(run_dir: Path, agent: BanditAgent, trainer: Trainer) -> None:
         trainer.portfolio.entry_value = state.portfolio_entry_value
         trainer._last_price = state.prev_price
         trainer._last_value = state.prev_value
+        # reward shaping state
+        trainer._reward_baseline = float(getattr(state, 'reward_baseline_ema', 0.0))
+        trainer._reward_var_ema = float(getattr(state, 'reward_var_ema', config.REWARD_VAR_INIT))
+        trainer._prob_alpha = float(getattr(state, 'prob_alpha', config.PROB_SHAPING_ALPHA0))
+        trainer._prob_beta = float(getattr(state, 'prob_beta', config.PROB_SHAPING_BETA0))
 
 

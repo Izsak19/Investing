@@ -15,9 +15,31 @@ DEFAULT_RANDOM_SEED = 1337
 # Trading costs
 FEE_RATE = 0.001            # exchange fee per transaction
 TURNOVER_PENALTY = 0.001    # extra friction per executed trade as fraction of notional
+SLIPPAGE_RATE = 0.0005      # execution slippage as fraction of notional
+
+# Cost-aware gating (1m data is extremely fee-sensitive)
+COST_AWARE_GATING = True
+EDGE_SAFETY_MARGIN = 0.0002  # extra edge required above estimated costs (tanh-space)
 
 INITIAL_CASH = 1000.0
 MIN_TRAINING_CASH = 50.0    # auto-refill threshold to avoid stalled learning
+
+# --- Microstructure friction / gating ---------------------------------
+
+# Extra safety margin added to the all-in cost estimate (fraction of notional).
+GATE_SAFETY_MARGIN = 0.0002
+
+# Multiplier to convert estimated cost fraction into an edge threshold.
+# Increase if you still see churn; decrease if you see "stuck in hold".
+COST_EDGE_MULT = 1.0
+
+# Throttles (1m is extremely fee-sensitive).
+# These values are deliberately conservative to reduce churn.
+MIN_TRADE_GAP_STEPS = 30
+MIN_HOLD_STEPS = 120
+
+# Start gating early (otherwise you churn during warmup)
+WARMUP_TRADES_BEFORE_GATING = 20
 
 # ---- Bandit / RL knobs -------------------------------------------------------
 
@@ -26,16 +48,16 @@ USE_TD = True               # enable TD(0) target inside the linear bandit updat
 TD_GAMMA = 0.90             # discount for TD target
 
 # Ridge prior strength: higher -> more conservative updates early on
-RIDGE_FACTOR = 1.0
+RIDGE_FACTOR = 4.0
 FORGETTING_FACTOR = 0.99    # exponential decay for RLS updates; 1.0 disables forgetting
 
 # Thompson sampling scale (exploration). We decay this with a half-life schedule.
-POSTERIOR_SCALE = 0.65
+POSTERIOR_SCALE = 0.45
 POSTERIOR_SCALE_MIN = 0.05
-POSTERIOR_DECAY_HALF_LIFE_STEPS = 7_500  # ~half the exploration after this many steps; 0 disables decay
+POSTERIOR_DECAY_HALF_LIFE_STEPS = 8_000  # ~half the exploration after this many steps; 0 disables decay
 
 # Reward scaling / risk budgets
-REWARD_SCALE = 125.0
+REWARD_SCALE = 110.0
 REWARD_SCALE_MIN = 80.0
 REWARD_SCALE_MAX = 200.0
 ADAPTIVE_REWARD_SCALE = True
@@ -49,13 +71,38 @@ DRAWDOWN_BUDGET_MIN = 0.08
 DRAWDOWN_BUDGET_MAX = 0.20
 ADAPTIVE_RISK_RANGE = 0.45         # how much to loosen/tighten budgets based on Sharpe
 
-DRAWDOWN_PENALTY = 0.0
-TURNOVER_BUDGET_MULTIPLIER = 12.0
+# Risk penalties (were 0.0 previously). These provide teeth against deep drawdowns and churn.
+DRAWDOWN_PENALTY = 0.6
+# Tighter turnover budget to penalize high churn.
+TURNOVER_BUDGET_MULTIPLIER = 6.0
 TURNOVER_BUDGET_MIN = 6.0
 TURNOVER_BUDGET_MAX = 20.0
 TURNOVER_BUDGET_WINDOW = 500
-TURNOVER_BUDGET_PENALTY = 0.0
+TURNOVER_BUDGET_PENALTY = 0.2
 RETURN_HISTORY_WINDOW = 200
+
+# ---- Reward shaping / normalization -----------------------------------------
+# These keep the learning signal informative (bounded), reduce variance via an
+# advantage-style baseline, and optionally add early exploratory noise that has
+# zero mean (so it doesn't bias the long-run optimum).
+USE_ADVANTAGE_BASELINE = True
+BASELINE_EMA_DECAY = 0.02          # EMA update rate for baseline (pct of initial_cash)
+USE_REWARD_STD_NORMALIZATION = True
+REWARD_SIGMA_FLOOR = 1e-4          # floor for std in pct units to avoid blow-ups
+REWARD_VAR_INIT = ADAPTIVE_TARGET_RETURN_VOL ** 2
+REWARD_TANH_INPUT_CLIP = 3.5       # clip tanh input to avoid saturation
+
+# Probabilistic shaping noise: sample from Beta(alpha,beta), subtract its mean
+# to make it zero-mean, then add it to the tanh input. This increases early
+# exploration but decays away over time.
+ENABLE_PROB_SHAPING = True
+PROB_SHAPING_ALPHA0 = 1.0
+PROB_SHAPING_BETA0 = 1.0
+PROB_SHAPING_COUNT_DECAY = 0.001   # forgetting for alpha/beta counts
+PROB_SHAPING_TANH_AMPLITUDE = 0.35 # max additive noise in tanh-input units
+PROB_SHAPING_HALF_LIFE_STEPS = 20_000
+PROB_SHAPING_MAX_COUNT = 50_000
+
 
 # Numeric safety
 FEATURE_CLIP = 10.0
@@ -63,10 +110,6 @@ WEIGHT_CLIP = 10.0
 ERROR_CLIP = 5.0
 
 # ---- Execution policy knobs --------------------------------------------------
-
-# Trade timing safeguards
-MIN_HOLD_STEPS = 1
-MIN_TRADE_GAP_STEPS = 1
 
 # Adaptive rescue when the agent gets stuck in HOLD
 ENABLE_STUCK_UNFREEZE = True
@@ -76,17 +119,16 @@ STUCK_POSTERIOR_BOOST = 0.35      # additive boost to exploration scale when stu
 STUCK_EDGE_THRESHOLD = 0.00005    # relaxed edge gate used while stuck
 
 # Position sizing (dynamic)
-POSITION_FRACTION_MIN = 0.05     # min fraction when taking a trade
-POSITION_FRACTION_MAX = 0.75     # max fraction when model is very confident
+POSITION_FRACTION_MIN = 0.03     # min fraction when taking a trade
+POSITION_FRACTION_MAX = 0.35     # max fraction when model is very confident
 CONFIDENCE_K = 3.5               # slope for sigmoid(confidence); higher = more decisive
-PARTIAL_SELLS = True             # enable partial liquidation based on confidence
+PARTIAL_SELLS = False            # simplify accounting + reduce micro-chop on 1m
 
 # Legacy (kept for compatibility; no longer used when dynamic sizing is on)
 POSITION_FRACTION = 0.5
 
 # Only trade if predicted advantage beats costs by this margin (model units)
 EDGE_THRESHOLD = 0.0005          # in scaled reward units (tanh space); 0 to disable gating
-WARMUP_TRADES_BEFORE_GATING = 10
 
 # Reporting
 ACTION_HISTORY_WINDOW = 5_000
@@ -144,6 +186,7 @@ PROFILES = {
         # "MIN_TRAINING_CASH": 0.0,
     }
 }
+
 
 
 def apply_profile(name: str | None) -> None:

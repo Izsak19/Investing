@@ -2,14 +2,13 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from rich.align import Align
 from rich.console import Console
 from rich.live import Live
 from rich.table import Table
 
-from src.agent import ACTIONS, BanditAgent
-from src.trainer import Portfolio, StepResult
 from src import config
+from src.agent import BanditAgent
+from src.trainer import Portfolio, StepResult
 
 console = Console()
 
@@ -34,47 +33,59 @@ def build_table(
     timing_blocks: int,
     budget_blocks: int,
 ) -> Table:
+    """Render a compact dashboard (<= 10 rows).
+
+    The goal is to keep the live view focused on the few numbers that most
+    directly explain: (1) what action was taken, (2) why, (3) how it impacted
+    equity, and (4) whether risk/guardrails are binding.
+    """
+
     table = Table(title="Lightweight BTC/USDT Trainer", expand=True)
     table.add_column("Metric", justify="left")
     table.add_column("Value", justify="right")
 
+    # 1) Step
     table.add_row("Step", str(step))
-    table.add_row("Close Price", f"{price:,.2f}")
-    table.add_row("Action", result.action.upper())
-    table.add_row("Trainer Reward", f"{result.trainer_reward:+.4f}")
-    table.add_row("Realized PnL", f"{result.realized_pnl:+.4f}")
-    table.add_row("Portfolio Δ (MTM)", f"{mtm_delta:+.4f}")
-    table.add_row("Trade Impact", f"{trade_impact:+.4f}")
-    table.add_row("Fee", f"{result.fee_paid:+.4f}")
-    table.add_row("Turnover Penalty", f"{result.turnover_penalty:+.4f}")
-    table.add_row("Refilled", "Yes" if result.refilled else "No")
-    table.add_row("Refill Count", str(refill_count))
-    table.add_row("Cash", f"{portfolio.cash:,.2f}")
-    table.add_row("Position", f"{portfolio.position:.6f}")
-    table.add_row("Portfolio Value", f"{portfolio_value:,.2f}")
-    table.add_row("Executed Trades", str(agent.state.trades))
-    table.add_row("Sell Win Rate", f"{sell_win_rate:.2%}")
-    table.add_row("Step Win Rate", f"{step_win_rate:,.2f}%")
-    table.add_row("Total Reward", f"{agent.state.total_reward:+.2f}")
-    table.add_row("Total Return", f"{total_return:+.2%}")
-    table.add_row("Sharpe Ratio", f"{sharpe_ratio:.3f}")
-    table.add_row("Max Drawdown", f"{max_drawdown:.2%}")
-    table.add_row("Edge Margin", f"{result.edge_margin:+.4f} vs {config.EDGE_THRESHOLD:.4f}")
-    hold_reason = result.hold_reason or "-"
-    table.add_row("Hold Reason", hold_reason)
-    table.add_row("Gate Blocks", str(gate_blocks))
-    table.add_row("Timing Blocks", str(timing_blocks))
-    table.add_row("Budget Blocks", str(budget_blocks))
 
-    q_values = Table.grid(expand=True)
-    q_values.add_row("Q-values", ", ".join(f"{a}:{v:.3f}" for a, v in zip(ACTIONS, agent.state.q_values)))
-    posterior_scale = agent.state.last_epsilon if hasattr(agent, "state") else config.POSTERIOR_SCALE
-    table.add_row("Sampling Scale", f"{posterior_scale:.2f}")
-    if action_distribution:
-        dist_str = ", ".join(f"{k}:{v:.1%}" for k, v in action_distribution.items())
-        table.add_row("Action Mix", dist_str)
-    table.add_row("", "")
-    table.add_row("Q", Align.left(q_values))
+    # 2) Price
+    table.add_row("Close", f"{price:,.2f}")
+
+    # 3) Action context (proposed vs executed + hold reason)
+    proposed = getattr(result, "proposed_action", result.action)
+    hold_reason = getattr(result, "hold_reason", None) or "-"
+    action_str = result.action.upper()
+    if proposed != result.action:
+        action_str = f"{action_str} (proposed {proposed.upper()})"
+    if hold_reason != "-":
+        action_str = f"{action_str} | hold={hold_reason}"
+    table.add_row("Action", action_str)
+
+    # 4) Edge margin (gate signal strength)
+    table.add_row("Edge", f"{result.edge_margin:+.3f} vs {config.EDGE_THRESHOLD:.3f}")
+
+    # 5) Portfolio value and MTM delta
+    table.add_row("Portfolio", f"{portfolio_value:,.2f} | MTM {mtm_delta:+.2f}")
+
+    # 6) Exposure
+    table.add_row("Exposure", f"cash {portfolio.cash:,.2f} | pos {portfolio.position:.6f}")
+
+    # 7) Reward (raw trainer reward + scaled reward used by the agent)
+    table.add_row("Reward", f"raw {result.trainer_reward:+.2f} | scaled {result.scaled_reward:+.3f}")
+
+    # 8) Costs & execution impact
+    slip = getattr(result, 'slippage_paid', 0.0)
+    table.add_row("Costs", f"fee {result.fee_paid:+.2f} | turnover {result.turnover_penalty:+.2f} | slip {slip:+.2f} | impact {trade_impact:+.2f}")
+
+    # 9) Performance snapshot
+    perf = (
+        f"ret {total_return:+.2%} | sharpe {sharpe_ratio:.2f} | dd {max_drawdown:.2%}"
+        f" | trades {agent.state.trades} | win {sell_win_rate:.0%}"
+    )
+    table.add_row("Perf", perf)
+
+    # 10) Guardrail diagnostics (why actions were blocked)
+    table.add_row("Blocks", f"gate {gate_blocks} | timing {timing_blocks} | budget {budget_blocks}")
+
     return table
 
 
