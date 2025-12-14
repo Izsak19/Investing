@@ -444,7 +444,7 @@ class Trainer:
             investable_base = trade_cash - fee_paid
             turnover_penalty = investable_base * config.TURNOVER_PENALTY
             investable = investable_base - turnover_penalty
-            gross_outlay = trade_cash + turnover_penalty
+            gross_outlay = trade_cash
             if investable > 0 and gross_outlay <= cash_before:
                 trade_executed = True
                 notional_traded = gross_outlay
