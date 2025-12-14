@@ -513,7 +513,7 @@ class Trainer:
                 # DEBUG (optional): verify the immediate MTM impact of this BUY
                 # Why: catches any hidden re-charges or double counting early.
                 trade_impact = self.portfolio.value(price_now) - value_before
-                expected_impact = -(fee_paid + turnover_penalty)
+                expected_impact = -(fee_paid + turnover_penalty + slippage_paid)
                 if abs(trade_impact - expected_impact) > 1e-6:
                     print(
                         f"[warn] buy impact mismatch: got {trade_impact:.6f}, expected {expected_impact:.6f}"
