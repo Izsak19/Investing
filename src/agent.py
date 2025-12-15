@@ -305,9 +305,16 @@ class BanditAgent:
         step: int | None = None,
         posterior_scale_override: float | None = None,
     ) -> str:
-        action, _, _ = self.act_with_scores(
+        action, sampled, means = self.act_with_scores(
             features, allowed=allowed, step=step, posterior_scale_override=posterior_scale_override
         )
+        # Confidence-based gating: avoid churn when edge is weak
+        if allowed is not None and 'hold' in allowed:
+            vals = np.asarray(sampled)
+            idxs = [ACTIONS.index(a) for a in allowed]
+            ranked = np.sort(vals[idxs])
+            if len(ranked) >= 2 and (ranked[-1] - ranked[-2]) < config.EDGE_THRESHOLD:
+                return 'hold'
         return action
 
     # --- learning -------------------------------------------------------------

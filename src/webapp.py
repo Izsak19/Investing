@@ -14,7 +14,9 @@ import uvicorn
 @dataclass
 class TradeEvent:
     id: int
+    cycle_id: int
     step: int
+    episode_step: int
     timestamp: str
     open: float
     high: float
@@ -62,6 +64,8 @@ class WebDashboard:
         self._thread: Optional[threading.Thread] = None
 
         self._latest_metrics: Dict[str, float] = {}
+        self._cycle_id: int = 0
+        self._next_event_id: int = 0
         self._load_routes()
 
     def _load_routes(self) -> None:
@@ -81,9 +85,21 @@ class WebDashboard:
                 payload = {
                     "events": filtered,
                     "last_id": last_id,
+                    "cycle_id": self._cycle_id,
                     "metrics": self._latest_metrics,
                 }
             return payload
+
+    def reset_cycle(self) -> None:
+        """Clear the event buffer and advance the cycle counter.
+
+        This is used when the trainer starts a new episode/window so the browser
+        chart doesn't accumulate overlapping candles and markers from prior cycles.
+        """
+        with self._lock:
+            self._events.clear()
+            self._latest_metrics = {}
+            self._cycle_id += 1
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -106,8 +122,10 @@ class WebDashboard:
     def publish_event(
         self,
         step: int,
-        timestamp: object,
-        ohlc: Dict[str, float],
+        *,
+        episode_step: int = 0,
+        timestamp: object | None = None,
+        ohlc: Dict[str, float] | None = None,
         action: str,
         reward: float,
         portfolio_value: float,
@@ -116,7 +134,6 @@ class WebDashboard:
         success_rate: float,
         step_win_rate: float,
         total_reward: float,
-        *,
         trainer_reward: float,
         mtm_delta: float,
         trade_impact: float,
@@ -135,11 +152,15 @@ class WebDashboard:
     ) -> None:
         ts_str = "" if timestamp is None else str(timestamp)
         action_distribution = action_distribution or {}
+        ohlc = ohlc or {}
         with self._lock:
-            next_id = (self._events[-1].id + 1) if self._events else 0
+            next_id = self._next_event_id
+            self._next_event_id += 1
             event = TradeEvent(
                 id=next_id,
-                step=step,
+                cycle_id=int(self._cycle_id),
+                step=int(step),
+                episode_step=int(episode_step),
                 timestamp=ts_str,
                 open=float(ohlc.get("open", ohlc.get("close", 0.0))),
                 high=float(ohlc.get("high", ohlc.get("close", 0.0))),

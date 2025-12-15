@@ -282,7 +282,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     base = Path(config.RUNS_DIR); base.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now(datetime.UTC).strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     run_id = args.run_id or f"auto_{args.symbol.replace('/', '_')}_{args.timeframe}_{timestamp}"
     run_dir = base / run_id; run_dir.mkdir(parents=True, exist_ok=True)
     for cycle in range(1, args.max_cycles + 1):

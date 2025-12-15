@@ -64,6 +64,7 @@ class TrainerState:
     total_fee_paid: float = 0.0
     total_turnover_penalty_paid: float = 0.0
     total_slippage_paid: float = 0.0
+    total_notional_traded: float = 0.0
     # decision_count is total_steps; executed_trade_count counts only actual fills
     executed_trade_count: int = 0
     buy_legs: int = 0
@@ -82,6 +83,10 @@ class TrainerState:
     positive_steps: int = 0
     last_trade_step: int = -1
     last_entry_step: int = -1
+    # action hysteresis state (persisted for resume)
+    last_direction: str | None = None        # last executed non-hold action
+    flip_candidate: str | None = None       # proposed direction we're considering flipping to
+    flip_streak: int = 0                   # consecutive proposals for flip_candidate
     gate_blocks: int = 0
     timing_blocks: int = 0
     budget_blocks: int = 0
@@ -162,19 +167,30 @@ class Trainer:
         self._last_value: float | None = None
         self.last_trade_step = -1
         self.last_entry_step = -1
+        # action hysteresis state
+        self._last_direction: str | None = None
+        self._flip_candidate: str | None = None
+        self._flip_streak: int = 0
         self.last_data_is_live: bool | None = None
         self._equity_curve: list[float] = []
         self._return_history: deque[float] = deque(maxlen=config.RETURN_HISTORY_WINDOW)
         self._recent_actions: deque[str] = deque(maxlen=config.ACTION_HISTORY_WINDOW)
         self._action_counter: Counter[str] = Counter()
         self._turnover_window: deque[float] = deque(maxlen=config.TURNOVER_BUDGET_WINDOW)
+        # cumulative notional traded (for stable metrics; windowed sums can mislead)
+        self.total_notional_traded: float = 0.0
         self.timeframe = timeframe or agent.state.timeframe or config.DEFAULT_TIMEFRAME
         self.periods_per_year = periods_per_year(self.timeframe)
         self.penalty_profile = penalty_profile
         self.gate_blocks = 0
         self.timing_blocks = 0
         self.budget_blocks = 0
+        self._last_direction = None
+        self._flip_candidate = None
+        self._flip_streak = 0
         self._hold_reason_log: list[tuple[int, str, str]] = []
+        # per-position buy-leg cap to avoid repeated scaling-in on noisy 1m
+        self._buy_legs_current: int = 0
         # adaptive knobs (start from config values)
         self.reward_scale = config.REWARD_SCALE
         self.drawdown_budget = config.DRAWDOWN_BUDGET
@@ -196,6 +212,7 @@ class Trainer:
         self._recent_actions.clear()
         self._action_counter.clear()
         self._turnover_window.clear()
+        self.total_notional_traded = 0.0
         self.steps = 0
         self.total_steps = 0
         self.positive_steps = 0
@@ -212,6 +229,7 @@ class Trainer:
         self.timing_blocks = 0
         self.budget_blocks = 0
         self._hold_reason_log.clear()
+        self._buy_legs_current = 0
         self.reward_scale = config.REWARD_SCALE
         self.drawdown_budget = config.DRAWDOWN_BUDGET
         self.turnover_budget_multiplier = config.TURNOVER_BUDGET_MULTIPLIER
@@ -269,6 +287,11 @@ class Trainer:
         )
 
     def _stuck_adaptation(self, posterior_scale_override: float | None) -> tuple[float | None, float, bool]:
+        """Return (posterior_scale_override, edge_threshold, stuck_relax).
+
+        stuck_relax indicates we are in a HOLD-dominant regime and should loosen
+        gating (and optionally boost exploration) to avoid freezing.
+        """
         if not config.ENABLE_STUCK_UNFREEZE:
             return posterior_scale_override, config.EDGE_THRESHOLD, False
 
@@ -290,6 +313,27 @@ class Trainer:
         if hold_ratio >= 0.99:
             relaxed_edge = 0.0
         return boosted_scale, relaxed_edge, True
+
+    def _regime_adjust_edge(self, row: pd.Series, base_edge: float, *, stuck_relax: bool) -> float:
+        """Adjust edge threshold based on a volatility percentile column.
+
+        Tighten edge in low-vol chop; relax edge in high-vol trend.
+        Disabled when stuck_relax is active (we already loosen gates there).
+        """
+        edge = float(base_edge)
+        if not config.ENABLE_REGIME_EDGE_GATING or stuck_relax:
+            return edge
+        try:
+            v = float(row.get(config.REGIME_EDGE_VOL_COL, np.nan))
+        except Exception:
+            v = float('nan')
+        if not np.isfinite(v):
+            return edge
+        if v < config.REGIME_EDGE_LOW_PCT:
+            edge *= float(config.REGIME_EDGE_TIGHTEN_MULT)
+        elif v > config.REGIME_EDGE_HIGH_PCT:
+            edge *= float(config.REGIME_EDGE_RELAX_MULT)
+        return _clamp(edge, config.EDGE_THRESHOLD_MIN, config.EDGE_THRESHOLD_MAX)
 
     def _walk_forward_returns(self, folds: int) -> list[float]:
         if folds <= 1 or len(self._equity_curve) < folds + 1:
@@ -389,6 +433,9 @@ class Trainer:
         posterior_scale_effective, edge_threshold, stuck_relax = self._stuck_adaptation(
             posterior_scale_override
         )
+        # Regime-adaptive edge gating: tighten in chop / relax in trend.
+        # Applied after stuck adaptation so HOLD-freeze rescue can still work.
+        edge_threshold = self._regime_adjust_edge(row, edge_threshold, stuck_relax=stuck_relax)
 
         action, sampled_scores, means = self.agent.act_with_scores(
             features,
@@ -447,6 +494,65 @@ class Trainer:
                 hold_reason = hold_reason or "timing_hold"
                 timing_blocked = True
                 self.timing_blocks += 1
+
+        # --- action hysteresis ------------------------------------------------
+        # Reduce flip-flopping between BUY/SELL. We only allow a direction flip
+        # after it has been proposed consistently for a few steps, unless the
+        # edge is very strong (edge >= HYSTERESIS_ALLOW_IF_EDGE_MULT * cost_edge).
+        if (
+            config.ENABLE_ACTION_HYSTERESIS
+            and (not warmup_active)
+            and (not stuck_relax)
+            and proposed_action in ("buy", "sell")
+            and self._last_direction in ("buy", "sell")
+            and proposed_action != self._last_direction
+        ):
+            # Very-strong-edge override: allow immediate flip
+            strong_ok = edge_margin >= (config.HYSTERESIS_ALLOW_IF_EDGE_MULT * cost_edge)
+            if not strong_ok:
+                if self._flip_candidate != proposed_action:
+                    self._flip_candidate = proposed_action
+                    self._flip_streak = 1
+                else:
+                    self._flip_streak += 1
+                if self._flip_streak < int(config.HYSTERESIS_REQUIRED_STREAK):
+                    action = "hold"
+                    hold_reason = hold_reason or "hysteresis"
+                    timing_blocked = True
+                    self.timing_blocks += 1
+                else:
+                    # flip allowed; reset streak
+                    self._flip_candidate = None
+                    self._flip_streak = 0
+            else:
+                # strong edge: allow immediate flip and reset
+                self._flip_candidate = None
+                self._flip_streak = 0
+        elif proposed_action in ("buy", "sell") and proposed_action == self._last_direction:
+            # reaffirmation resets flip tracking
+            self._flip_candidate = None
+            self._flip_streak = 0
+
+        # --- multi-timeframe confirmation ------------------------------------
+        # Lightweight regime filter using 5m rolling percentiles computed in indicators.
+        # Avoid trading in low-vol chop and during high-spread microstructure stress.
+        if (
+            config.ENABLE_MTF_CONFIRMATION
+            and (not warmup_active)
+            and (not stuck_relax)
+            and action in ("buy", "sell")
+        ):
+            try:
+                vol_pct = float(row.get("rv1m_pct_5m", np.nan))
+                spr_pct = float(row.get("spread_pct_5m", np.nan))
+            except Exception:
+                vol_pct, spr_pct = float('nan'), float('nan')
+            if np.isfinite(vol_pct) and np.isfinite(spr_pct):
+                if (vol_pct < float(config.MTF_VOL_PCT_MIN)) or (spr_pct > float(config.MTF_SPREAD_PCT_MAX)):
+                    action = "hold"
+                    hold_reason = hold_reason or "mtf"
+                    gate_blocked = True
+                    self.gate_blocks += 1
 
         trade_executed = False
         fee_paid = 0.0
@@ -530,6 +636,8 @@ class Trainer:
             trade_size = position_before * min(1.0, max(0.0, sell_frac))
             if trade_size > 0:
                 trade_executed = True
+                # stash entry price BEFORE mutating portfolio (needed for per-leg win-rate)
+                entry_price_for_leg = self.portfolio.entry_price
                 gross_proceeds = trade_size * price_now
                 fee_paid = gross_proceeds * config.FEE_RATE
                 turnover_penalty = gross_proceeds * config.TURNOVER_PENALTY
@@ -566,6 +674,7 @@ class Trainer:
         step_return = reward / max(value_before, 1e-6)
         self._return_history.append(step_return)
         self._turnover_window.append(notional_traded)
+        self.total_notional_traded += float(notional_traded)
         self._update_adaptive_risk_controls()
 
         prospective_curve = self._equity_curve + [value_next]
@@ -661,14 +770,23 @@ class Trainer:
         self._equity_curve.append(value_next)
 
         # execution counters and per-leg win-rate accounting
+        if trade_executed and action in ("buy", "sell"):
+            self._last_direction = action
+            self._flip_candidate = None
+            self._flip_streak = 0
+
+        # execution counters and per-leg win-rate accounting
         if trade_executed:
             self.executed_trade_count += 1
             if action == "buy":
                 self.buy_legs += 1
             elif action == "sell":
                 self.sell_legs += 1
-                # per-leg PnL: compare price_now to entry_price for the size sold
-                leg_pnl = (price_now - self.portfolio.entry_price) * (notional_traded / max(price_now, 1e-9))
+                # per-leg PnL: use entry price BEFORE the sell (especially important on full closes)
+                # We stash it during execution in entry_price_for_leg.
+                entry_price_for_leg = locals().get("entry_price_for_leg", self.portfolio.entry_price)
+                leg_qty = notional_traded / max(price_now, 1e-9)
+                leg_pnl = (price_now - entry_price_for_leg) * leg_qty
                 if leg_pnl > 0:
                     self.winning_sell_legs += 1
 
@@ -755,7 +873,7 @@ class Trainer:
             "buy_legs": int(getattr(self, 'buy_legs', 0)),
             "sell_legs": int(getattr(self, 'sell_legs', 0)),
             "winning_sell_legs": int(getattr(self, 'winning_sell_legs', 0)),
-            "avg_notional_per_trade": (sum(self._turnover_window) / max(1, int(getattr(self, 'executed_trade_count', 0)))) if int(getattr(self, 'executed_trade_count', 0)) > 0 else 0.0,
+            "avg_notional_per_trade": (float(getattr(self, 'total_notional_traded', 0.0)) / max(1, int(getattr(self, 'executed_trade_count', 0)))) if int(getattr(self, 'executed_trade_count', 0)) > 0 else 0.0,
             "turnover_per_1000_steps": (sum(self._turnover_window) / max(1, self.total_steps)) * 1000.0,
             # legacy field name kept (now uses executed_trade_count by default)
             "executed_trades": executed_trades if executed_trades is not None else int(getattr(self, 'executed_trade_count', 0)),
@@ -791,6 +909,7 @@ class Trainer:
             total_fee_paid=self.total_fee_paid,
             total_turnover_penalty_paid=self.total_turnover_penalty_paid,
             total_slippage_paid=getattr(self, 'total_slippage_paid', 0.0),
+            total_notional_traded=float(getattr(self, 'total_notional_traded', 0.0)),
             executed_trade_count=int(getattr(self, 'executed_trade_count', 0)),
             buy_legs=int(getattr(self, 'buy_legs', 0)),
             sell_legs=int(getattr(self, 'sell_legs', 0)),
@@ -808,6 +927,9 @@ class Trainer:
             positive_steps=self.positive_steps,
             last_trade_step=self.last_trade_step,
             last_entry_step=self.last_entry_step,
+            last_direction=self._last_direction,
+            flip_candidate=self._flip_candidate,
+            flip_streak=int(self._flip_streak),
             gate_blocks=self.gate_blocks,
             timing_blocks=self.timing_blocks,
             budget_blocks=self.budget_blocks,
@@ -815,6 +937,10 @@ class Trainer:
             reward_scale=self.reward_scale,
             drawdown_budget=self.drawdown_budget,
             turnover_budget_multiplier=self.turnover_budget_multiplier,
+            # metrics helpers
+            # (not used for execution; purely for reporting)
+            # total_notional_traded is cumulative across the run
+            
             reward_baseline_ema=self._reward_baseline,
             reward_var_ema=self._reward_var_ema,
             prob_alpha=self._prob_alpha,
@@ -943,6 +1069,7 @@ def resume_from(run_dir: Path, agent: BanditAgent, trainer: Trainer) -> None:
         trainer.total_fee_paid = state.total_fee_paid
         trainer.total_turnover_penalty_paid = state.total_turnover_penalty_paid
         trainer.total_slippage_paid = float(getattr(state, 'total_slippage_paid', 0.0))
+        trainer.total_notional_traded = float(getattr(state, 'total_notional_traded', 0.0))
         trainer.executed_trade_count = int(getattr(state, 'executed_trade_count', 0))
         trainer.buy_legs = int(getattr(state, 'buy_legs', 0))
         trainer.sell_legs = int(getattr(state, 'sell_legs', 0))
@@ -951,6 +1078,9 @@ def resume_from(run_dir: Path, agent: BanditAgent, trainer: Trainer) -> None:
         trainer.winning_sells = state.winning_sells
         trainer.last_trade_step = state.last_trade_step
         trainer.last_entry_step = state.last_entry_step
+        trainer._last_direction = getattr(state, 'last_direction', None)
+        trainer._flip_candidate = getattr(state, 'flip_candidate', None)
+        trainer._flip_streak = int(getattr(state, 'flip_streak', 0) or 0)
         trainer.gate_blocks = state.gate_blocks
         trainer.timing_blocks = state.timing_blocks
         trainer.budget_blocks = state.budget_blocks
