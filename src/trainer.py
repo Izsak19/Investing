@@ -41,6 +41,8 @@ class StepResult:
     trainer_reward: float
     scaled_reward: float
     trade_executed: bool
+    trade_size: float
+    notional_traded: float
     fee_paid: float
     turnover_penalty: float
     slippage_paid: float
@@ -560,6 +562,7 @@ class Trainer:
         slippage_paid = 0.0
         realized_pnl = 0.0
         notional_traded = 0.0
+        trade_size = 0.0
 
         value_before = self.portfolio.value(price_now)
         position_before = self.portfolio.position
@@ -804,6 +807,8 @@ class Trainer:
             trainer_reward=trainer_reward,
             scaled_reward=scaled_reward,
             trade_executed=trade_executed,
+            trade_size=trade_size,
+            notional_traded=notional_traded,
             fee_paid=fee_paid,
             turnover_penalty=turnover_penalty,
             slippage_paid=slippage_paid,

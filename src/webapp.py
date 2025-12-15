@@ -29,6 +29,8 @@ class TradeEvent:
     trade_impact: float
     fee_paid: float
     turnover_penalty: float
+    trade_size: float
+    notional_traded: float
     refilled: bool
     refill_count: int
     success_rate: float
@@ -139,6 +141,8 @@ class WebDashboard:
         trade_impact: float,
         fee_paid: float,
         turnover_penalty: float,
+        trade_size: float,
+        notional_traded: float,
         refilled: bool,
         refill_count: int,
         executed_trades: int,
@@ -173,6 +177,8 @@ class WebDashboard:
                 trade_impact=float(trade_impact),
                 fee_paid=float(fee_paid),
                 turnover_penalty=float(turnover_penalty),
+                trade_size=float(trade_size),
+                notional_traded=float(notional_traded),
                 refilled=bool(refilled),
                 refill_count=int(refill_count),
                 success_rate=float(success_rate),
@@ -194,6 +200,7 @@ class WebDashboard:
             )
             self._events.append(event)
             self._latest_metrics = {
+                "action": action,
                 "success_rate": float(success_rate),
                 "step_win_rate": float(step_win_rate),
                 "total_reward": float(total_reward),
@@ -205,6 +212,8 @@ class WebDashboard:
                 "trade_impact": float(trade_impact),
                 "fee_paid": float(fee_paid),
                 "turnover_penalty": float(turnover_penalty),
+                "trade_size": float(trade_size),
+                "notional_traded": float(notional_traded),
                 "refilled": bool(refilled),
                 "refill_count": int(refill_count),
                 "executed_trades": int(executed_trades),
