@@ -117,41 +117,60 @@
       </section>
     </main>
     <script>
-      const candleTrace = {
-        x: [],
-        open: [],
-        high: [],
-        low: [],
-        close: [],
-        type: "candlestick",
-        name: "Price",
-        increasing: { line: { color: "#10b981" } },
-        decreasing: { line: { color: "#ef4444" } },
-      };
-
-      const actionTrace = {
-        x: [],
-        y: [],
-        mode: "markers",
-        name: "Actions",
-        marker: { size: 10, color: [] },
-        text: [],
-        hovertemplate: "%{text}<br>Price: %{y}<extra></extra>",
-      };
-
-      const portfolioTrace = {
-        x: [],
-        y: [],
-        mode: "lines",
-        name: "Portfolio Value",
-        line: { color: "#fbbf24" },
-        yaxis: "y2",
-      };
-
       let lastId = -1;
+      let lastCycleId = null;
       let latestMetrics = null;
       const POLL_INTERVAL_MS = 1000;
       const statusEl = document.getElementById("status");
+
+      const layout = {
+        template: "plotly_dark",
+        margin: { t: 40, r: 20, b: 40, l: 60 },
+        xaxis: { rangeslider: { visible: false } },
+        yaxis: { title: "Price" },
+        yaxis2: {
+          title: "Portfolio",
+          overlaying: "y",
+          side: "right",
+          showgrid: false,
+        },
+        legend: { orientation: "h" },
+      };
+
+      function createTraces() {
+        const candleTrace = {
+          x: [],
+          open: [],
+          high: [],
+          low: [],
+          close: [],
+          type: "candlestick",
+          name: "Price",
+          increasing: { line: { color: "#10b981" } },
+          decreasing: { line: { color: "#ef4444" } },
+        };
+
+        const actionTrace = {
+          x: [],
+          y: [],
+          mode: "markers",
+          name: "Actions",
+          marker: { size: 10, color: [] },
+          text: [],
+          hovertemplate: "%{text}<br>Price: %{y}<extra></extra>",
+        };
+
+        const portfolioTrace = {
+          x: [],
+          y: [],
+          mode: "lines",
+          name: "Portfolio Value",
+          line: { color: "#fbbf24" },
+          yaxis: "y2",
+        };
+
+        return [candleTrace, actionTrace, portfolioTrace];
+      }
 
       function updateMetrics(metrics) {
         if (!metrics) return;
@@ -170,6 +189,13 @@
         document.getElementById("refillCount").textContent = metrics.refill_count ?? 0;
         document.getElementById("executedTrades").textContent = metrics.executed_trades ?? 0;
         document.getElementById("sellWinRate").textContent = `${((metrics.sell_win_rate || 0) * 100).toFixed(2)}%`;
+      }
+
+      function resetChart() {
+        const [candleTrace, actionTrace, portfolioTrace] = createTraces();
+        Plotly.react("chart", [candleTrace, actionTrace, portfolioTrace], layout);
+        lastId = -1;
+        latestMetrics = null;
       }
 
       function updateChart(events) {
@@ -204,7 +230,7 @@
           candleUpdate.low[0].push(evt.low);
           candleUpdate.close[0].push(evt.close);
 
-                   const isTrade = evt.action === "buy" || evt.action === "sell";
+          const isTrade = evt.action === "buy" || evt.action === "sell";
           if (isTrade) {
             const actionColor = evt.action === "buy" ? "#22c55e" : "#ef4444";
             actionUpdate.x[0].push(label);
@@ -258,6 +284,10 @@
           const res = await fetch(`/api/events?since=${lastId}`, { cache: "no-store" });
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           const payload = await res.json();
+          if (lastCycleId !== null && payload.cycle_id !== lastCycleId) {
+            resetChart();
+          }
+          lastCycleId = payload.cycle_id;
           lastId = payload.last_id ?? lastId;
           updateChart(payload.events);
           const mergedMetrics = mergeMetrics(payload);
@@ -277,20 +307,9 @@
       }
 
       const history = 500;
+      const [candleTrace, actionTrace, portfolioTrace] = createTraces();
 
-      Plotly.newPlot("chart", [candleTrace, actionTrace, portfolioTrace], {
-        template: "plotly_dark",
-        margin: { t: 40, r: 20, b: 40, l: 60 },
-        xaxis: { rangeslider: { visible: false } },
-        yaxis: { title: "Price" },
-        yaxis2: {
-          title: "Portfolio",
-          overlaying: "y",
-          side: "right",
-          showgrid: false,
-        },
-        legend: { orientation: "h" },
-      });
+      Plotly.newPlot("chart", [candleTrace, actionTrace, portfolioTrace], layout);
 
       startPolling();
     </script>
