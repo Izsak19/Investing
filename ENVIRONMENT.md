@@ -56,6 +56,8 @@ python auto_retrain.py --offline --max-cycles 3
 │  ├─ config.py            # all knobs (fees, gating, exploration, reward shaping, etc.)
 │  ├─ data_feed.py         # candle source (live via ccxt or synthetic offline)
 │  ├─ indicators.py        # feature engineering (MA/EMA/WMA/BOLL/VWAP/ATR/TRIX/SAR/SuperTrend)
+│  ├─ metrics.py           # drawdown, Sharpe, return, and volatility helpers
+│  ├─ timeframe.py         # timeframe → minutes helper utilities
 │  ├─ agent.py             # bandit policy + persistent agent state
 │  ├─ trainer.py           # portfolio sim + reward computation + training step loop
 │  ├─ dashboard.py         # Rich terminal dashboard
