@@ -187,6 +187,8 @@ class Trainer:
         self._hold_reason_counter: Counter[str] = Counter()
         # Gate diagnostics: which gate type blocked (cost, mtf, etc.).
         self._gate_reason_counter: Counter[str] = Counter()
+        # Pre-mask gate diagnostics: actions removed *before* proposed_action is recorded.
+        self._premask_gate_reason_counter: Counter[str] = Counter()
         # Hard risk-exit diagnostics (forced exits; off by default).
         self.forced_exit_count: int = 0
         self._forced_exit_reason_counter: Counter[str] = Counter()
@@ -232,6 +234,7 @@ class Trainer:
         self._proposed_action_counter.clear()
         self._hold_reason_counter.clear()
         self._gate_reason_counter.clear()
+        self._premask_gate_reason_counter.clear()
         self.forced_exit_count = 0
         self._forced_exit_reason_counter.clear()
         self._turnover_window.clear()
@@ -668,8 +671,12 @@ class Trainer:
             # 1) Cost feasibility: do not propose trades that do not clear cost_edge.
             if "buy" in feasible and buy_margin < cost_edge:
                 feasible.remove("buy")
+                # Pre-mask veto: the action never becomes proposed_action, so without
+                # this counter it would be invisible in gate_blocks/gate_reason_counts.
+                self._premask_gate_reason_counter["cost_gate_buy"] += 1
             if "sell" in feasible and sell_margin < cost_edge:
                 feasible.remove("sell")
+                self._premask_gate_reason_counter["cost_gate_sell"] += 1
 
             # 2) Cooldown feasibility for SELL: if we are inside the trade-gap cooldown,
             # only allow SELL proposals when they qualify for the strong-exit bypass.
@@ -681,6 +688,8 @@ class Trainer:
                 strong_sell = (sell_margin >= (config.COOLDOWN_STRONG_EDGE_MULT * cost_edge)) and bypass_allowed and min_gap_ok
                 if not strong_sell:
                     feasible.remove("sell")
+                    # Pre-mask veto: sell removed due to cooldown feasibility.
+                    self._premask_gate_reason_counter["cooldown_sell"] += 1
 
             # Ensure HOLD is always present.
             if "hold" not in feasible:
@@ -1379,6 +1388,7 @@ class Trainer:
             ),
             "hold_reason_counts": dict(self._hold_reason_counter),
             "gate_reason_counts": dict(self._gate_reason_counter),
+            "premask_gate_reason_counts": dict(self._premask_gate_reason_counter),
         }
         path = run_dir / "metrics.json"
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -53,7 +53,7 @@ TURNOVER_PENALTY = 0.00005
 # This throttle adds a soft-but-firm ceiling on trade frequency, while still
 # allowing risk-reducing exits.
 TRADE_RATE_WINDOW_STEPS = 1000          # ~16.7h on 1m (large enough to smooth)
-MAX_TRADES_PER_WINDOW = 300             # allow more learning trades; still prevents runaway churn
+MAX_TRADES_PER_WINDOW = 180             # allow more learning trades; still prevents runaway churn
 # When trade rate is exceeded:
 # - block BUYs entirely
 # - allow SELLs only when the sell edge is strong (margin >= multiplier * cost_edge)
@@ -67,9 +67,9 @@ COST_AWARE_GATING = True
 # Extra safety margin added to the all-in cost estimate (fraction of notional).
 GATE_SAFETY_MARGIN = 0.0001
 # Extra edge required above estimated costs (tanh-space units; keep small).
-EDGE_SAFETY_MARGIN = 0.00005
+EDGE_SAFETY_MARGIN = 0.00015
 # Multiplier applied when translating estimated cost fraction into edge threshold.
-COST_EDGE_MULT = 0.9
+COST_EDGE_MULT = 1.3
 
 # Start gating early (otherwise you churn during warmup)
 WARMUP_TRADES_BEFORE_GATING = 5
@@ -80,7 +80,7 @@ WARMUP_TRADES_BEFORE_GATING = 5
 
 # 1m is extremely fee-sensitive. These are intentionally conservative.
 MIN_TRADE_GAP_STEPS = 5      # allow more trading while learning
-MIN_HOLD_STEPS = 15          # allow exits/adjustments sooner
+MIN_HOLD_STEPS = 30          # allow exits/adjustments sooner
 
 # Adaptive/conditional cooldown (regime + turnover aware).
 ENABLE_ADAPTIVE_COOLDOWN = True
@@ -135,7 +135,7 @@ RIDGE_FACTOR = 6.0
 FORGETTING_FACTOR = 0.995
 
 # Thompson sampling (exploration) – lowered for stability on 1m.
-POSTERIOR_SCALE = 0.25
+POSTERIOR_SCALE = 0.18
 POSTERIOR_SCALE_MIN = 0.05
 POSTERIOR_DECAY_HALF_LIFE_STEPS = 6_000
 
@@ -260,7 +260,7 @@ MAX_BUY_LEGS_PER_POSITION = 1
 POSITION_FRACTION = 0.5
 
 # Base edge threshold (tanh-space). Slightly higher for 1m.
-EDGE_THRESHOLD = 0.0005
+EDGE_THRESHOLD = 0.0015
 EDGE_THRESHOLD_MIN = 0.0002
 EDGE_THRESHOLD_MAX = 0.0030
 
@@ -269,7 +269,7 @@ ENABLE_REGIME_EDGE_GATING = True
 REGIME_EDGE_VOL_COL = "rv1m_pct_5m"   # expected in [0,1]
 REGIME_EDGE_LOW_PCT = 0.30
 REGIME_EDGE_HIGH_PCT = 0.70
-REGIME_EDGE_TIGHTEN_MULT = 1.2
+REGIME_EDGE_TIGHTEN_MULT = 1.6
 REGIME_EDGE_RELAX_MULT = 0.6
 
 # Action hysteresis
