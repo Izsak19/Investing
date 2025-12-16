@@ -110,7 +110,14 @@ class BanditAgent:
     def _sanitize(features: np.ndarray) -> np.ndarray:
         # why: indicators can spike; keep dot products numerically safe
         arr = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
-        scale = float(max(np.std(arr), 1e-6))
+
+        # Stable per-vector scaling: use RMS magnitude (not std across feature dimensions).
+        # This avoids exploding values when many features are near-constant and reduces
+        # premature clipping/weight saturation.
+        n = int(arr.size) if arr.ndim == 1 else int(arr.shape[-1])
+        rms = float(np.linalg.norm(arr) / max(np.sqrt(n), 1.0))
+        scale = max(rms, 1e-6)
+
         normalized = arr / scale
         return np.clip(normalized, -config.FEATURE_CLIP, config.FEATURE_CLIP)
 
@@ -235,6 +242,41 @@ class BanditAgent:
         f = self._sanitize(features)
         return np.dot(np.asarray(self.state.weights), f)
 
+    def _sample_gaussian_weights(self, mean: np.ndarray, cov: np.ndarray) -> np.ndarray:
+        """Robust MVN sampler with guaranteed PSD covariance.
+
+        Why this exists: numpy.random.multivariate_normal will emit warnings (and internally
+        project the matrix) when cov is not symmetric PSD due to numerical drift.
+        That distorts Thompson exploration. Here we explicitly symmetrize, floor eigenvalues,
+        and use a Cholesky factor with adaptive jitter to guarantee a valid sample."""
+        m = np.asarray(mean, dtype=float)
+        C = np.asarray(cov, dtype=float)
+        # Symmetrize + remove NaN/inf early
+        C = 0.5 * (C + C.T)
+        C = np.nan_to_num(C, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
+        # Project to PSD (eigenvalue floor)
+        try:
+            eigvals, eigvecs = np.linalg.eigh(C)
+            # Floor eigenvalues relative to scale to avoid near-singularity
+            floor = 1e-10
+            eigvals = np.maximum(eigvals, floor)
+            C = eigvecs @ np.diag(eigvals) @ eigvecs.T
+            C = 0.5 * (C + C.T)
+        except np.linalg.LinAlgError:
+            # Worst-case fallback: diagonal covariance
+            C = np.eye(m.shape[0], dtype=float) * 1e-6
+        # Cholesky with increasing jitter for numerical robustness
+        for j in (0.0, 1e-12, 1e-10, 1e-8, 1e-6):
+            try:
+                L = np.linalg.cholesky(C + (np.eye(m.shape[0]) * j))
+                z = np.random.normal(size=m.shape[0])
+                return m + (L @ z)
+            except np.linalg.LinAlgError:
+                continue
+        # Final fallback: diagonal-only sampling from variances
+        var = np.clip(np.diag(C), 1e-12, None)
+        return m + np.random.normal(size=m.shape[0]) * np.sqrt(var)
+
     def _thompson_scores(self, features: np.ndarray, *, scale: float) -> tuple[np.ndarray, np.ndarray]:
         f = self._sanitize(features)
         means = np.dot(np.asarray(self.state.weights), f)
@@ -248,14 +290,7 @@ class BanditAgent:
             if scale <= 0:
                 w = mean
             else:
-                jitter = np.eye(self._feature_size, dtype=float) * 1e-6
-                try:
-                    w = np.random.multivariate_normal(mean, cov)
-                except np.linalg.LinAlgError:
-                    try:
-                        w = np.random.multivariate_normal(mean, cov + jitter)
-                    except np.linalg.LinAlgError:
-                        w = mean
+                w = self._sample_gaussian_weights(mean, cov)
             draws.append(float(np.dot(w, f)))
         return np.asarray(draws), means
 

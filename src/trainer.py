@@ -186,6 +186,8 @@ class Trainer:
         # Gate diagnostics: which gate type blocked (cost, mtf, etc.).
         self._gate_reason_counter: Counter[str] = Counter()
         self._turnover_window: deque[float] = deque(maxlen=config.TURNOVER_BUDGET_WINDOW)
+        # Separate anti-churn window: count executed trade legs (not notional)
+        self._trade_count_window: deque[int] = deque(maxlen=int(getattr(config, 'TRADE_RATE_WINDOW_STEPS', 0) or 0))
         # cumulative notional traded (for stable metrics; windowed sums can mislead)
         self.total_notional_traded: float = 0.0
         self.timeframe = timeframe or agent.state.timeframe or config.DEFAULT_TIMEFRAME
@@ -208,6 +210,8 @@ class Trainer:
         self._reward_var_ema = float(config.REWARD_VAR_INIT)
         self._prob_alpha = float(config.PROB_SHAPING_ALPHA0)
         self._prob_beta = float(config.PROB_SHAPING_BETA0)
+        # warn-once registry for percentile sanitization (data hygiene)
+        self._percentile_warned: set[str] = set()
 
     def reset_portfolio(self) -> None:
         """Reset portfolio and tracking buffers to their initial state."""
@@ -224,6 +228,8 @@ class Trainer:
         self._hold_reason_counter.clear()
         self._gate_reason_counter.clear()
         self._turnover_window.clear()
+        if hasattr(self, '_trade_count_window'):
+            self._trade_count_window.clear()
         self.total_notional_traded = 0.0
         self.steps = 0
         self.total_steps = 0
@@ -249,6 +255,8 @@ class Trainer:
         self._reward_var_ema = float(config.REWARD_VAR_INIT)
         self._prob_alpha = float(config.PROB_SHAPING_ALPHA0)
         self._prob_beta = float(config.PROB_SHAPING_BETA0)
+        # warn-once registry for percentile sanitization (data hygiene)
+        self._percentile_warned: set[str] = set()
 
     # --- helpers --------------------------------------------------------------
 
@@ -341,6 +349,7 @@ class Trainer:
             v = float('nan')
         if not np.isfinite(v):
             return edge
+        v = self._sanitize_unit_percentile(v, col=str(config.REGIME_EDGE_VOL_COL))
         if v < config.REGIME_EDGE_LOW_PCT:
             edge *= float(config.REGIME_EDGE_TIGHTEN_MULT)
         elif v > config.REGIME_EDGE_HIGH_PCT:
@@ -372,6 +381,8 @@ class Trainer:
             self._equity_curve.clear()
             self._return_history.clear()
             self._turnover_window.clear()
+            if hasattr(self, '_trade_count_window'):
+                self._trade_count_window.clear()
             self.refill_count += 1
             return True
         return False
@@ -408,10 +419,40 @@ class Trainer:
 
     @property
     def total_return(self) -> float:
+        # Use the last equity-curve point if available (it's computed using price_next),
+        # otherwise fall back to current marked-to-market value.
+        if self._equity_curve:
+            final_value = float(self._equity_curve[-1])
+            return total_return(self.initial_cash, final_value)
         price = self._last_price if self._last_price is not None else 0.0
         return total_return(self.initial_cash, self.portfolio.value(price))
 
     # --- core step ------------------------------------------------------------
+
+    def _sanitize_unit_percentile(self, v: float, *, col: str) -> float:
+        """Coerce percentile-like columns to unit interval [0,1].
+
+        Some indicator pipelines emit percentiles in 0..100. If we treat those
+        as 0..1, MTF gates can hard-veto almost every entry.
+        """
+        if not getattr(config, "SANITIZE_PERCENTILE_COLUMNS", True):
+            return float(v)
+        if not np.isfinite(v):
+            return float(v)
+        x = float(v)
+        # Heuristic: 0..100 percentile.
+        if 1.0 < x <= 100.0:
+            if col not in self._percentile_warned:
+                print(f"[warn] {col} looks like 0..100; rescaling to 0..1 (value={x})")
+                self._percentile_warned.add(col)
+            x = x / 100.0
+        # If it's slightly outside due to numeric drift, clamp.
+        if x < 0.0 or x > 1.0:
+            if col not in self._percentile_warned:
+                print(f"[warn] {col} outside [0,1]; clamping (value={x})")
+                self._percentile_warned.add(col)
+            x = _clamp(x, 0.0, 1.0)
+        return float(x)
 
     @staticmethod
     def _sigmoid(x: float) -> float:
@@ -435,22 +476,117 @@ class Trainer:
         price_next = float(next_row["close"])
         refilled = self._maybe_refill_portfolio(price_now)
 
-        features = build_features(row, self.portfolio)
-        allowed_actions = ["hold"]
-        # Only allow BUY when flat. Averaging-in on 1m data tends to create
-        # one-way policies (buy/hold) and makes SELL systematically unattractive
-        # under transaction costs.
-        if self.portfolio.position <= 0 and self.portfolio.cash > 0:
-            allowed_actions.append("buy")
-        if self.portfolio.position > 0:
-            allowed_actions.append("sell")
+        # Warmup: during the first N executed trades we relax gating/cooldowns so the
+        # agent can explore and collect informative samples.
+        warmup_active = self.agent.state.trades < config.WARMUP_TRADES_BEFORE_GATING
 
+        # --- early stuck detection (MUST be before gating/action masking) -------
         posterior_scale_effective, edge_threshold, stuck_relax = self._stuck_adaptation(
             posterior_scale_override
         )
         # Regime-adaptive edge gating: tighten in chop / relax in trend.
-        # Applied after stuck adaptation so HOLD-freeze rescue can still work.
+        # Disabled when stuck_relax is active (we already loosen gates there).
         edge_threshold = self._regime_adjust_edge(row, edge_threshold, stuck_relax=stuck_relax)
+
+        features = build_features(row, self.portfolio)
+
+        # ------------------------------------------------------------------
+        # Pre-mask actions using *timing feasibility* so the agent does not
+        # constantly propose trades that the cooldown will veto.
+        #
+        # This fixes the "proposed_action_distribution is trade-heavy but
+        # executed_action_distribution is HOLD-heavy" mismatch and reduces
+        # distorted learning signals on 1m data.
+        # ------------------------------------------------------------------
+        base_gap = int(getattr(config, "MIN_TRADE_GAP_STEPS", 0))
+        base_hold = int(getattr(config, "MIN_HOLD_STEPS", 0))
+        eff_gap = base_gap
+        eff_hold = base_hold
+        if getattr(config, "ENABLE_ADAPTIVE_COOLDOWN", False):
+            # volatility percentile in [0,1] (if missing, fall back to neutral 0.5).
+            vol_col = getattr(config, "COOLDOWN_VOL_COL", getattr(config, "REGIME_EDGE_VOL_COL", ""))
+            use_proxy = True
+            if vol_col:
+                try:
+                    raw_v = row.get(vol_col, None)
+                    if raw_v is not None and np.isfinite(raw_v):
+                        v = float(raw_v)
+                        if 0.0 <= v <= 1.0:
+                            vol_pct = v
+                            use_proxy = False
+                except Exception:
+                    pass
+            if use_proxy:
+                ret = 0.0
+                if self._last_price is not None and self._last_price > 0:
+                    ret = abs(price_now / self._last_price - 1.0)
+                decay = float(getattr(config, 'ADAPTIVE_COOLDOWN_RET_EMA_DECAY', 0.05))
+                decay = _clamp(decay, 0.0, 1.0)
+                if not hasattr(self, '_absret_ema'):
+                    self._absret_ema = ret
+                else:
+                    self._absret_ema = (1 - decay) * float(self._absret_ema) + decay * ret
+                base = max(float(getattr(self, '_absret_ema', 0.0)), 1e-12)
+                ratio = ret / base
+                vol_pct = 0.5 * (1.0 + math.tanh((ratio - 1.0) / 1.5))
+            vol_pct = _clamp(float(vol_pct), 0.0, 1.0)
+            low = float(getattr(config, "COOLDOWN_VOL_LOW_PCT", 0.30))
+            high = float(getattr(config, "COOLDOWN_VOL_HIGH_PCT", 0.70))
+            if vol_pct <= low:
+                gap_mult = float(getattr(config, "COOLDOWN_GAP_TIGHTEN_MULT", 1.0))
+                hold_mult = float(getattr(config, "COOLDOWN_HOLD_TIGHTEN_MULT", 1.0))
+            elif vol_pct >= high:
+                gap_mult = float(getattr(config, "COOLDOWN_GAP_RELAX_MULT", 1.0))
+                hold_mult = float(getattr(config, "COOLDOWN_HOLD_RELAX_MULT", 1.0))
+            else:
+                t = (vol_pct - low) / max(high - low, 1e-9)
+                gap_mult = (1 - t) * float(getattr(config, "COOLDOWN_GAP_TIGHTEN_MULT", 1.0)) + t * float(getattr(config, "COOLDOWN_GAP_RELAX_MULT", 1.0))
+                hold_mult = (1 - t) * float(getattr(config, "COOLDOWN_HOLD_TIGHTEN_MULT", 1.0)) + t * float(getattr(config, "COOLDOWN_HOLD_RELAX_MULT", 1.0))
+            gap_mult = _clamp(gap_mult, min(float(getattr(config, "COOLDOWN_GAP_RELAX_MULT", 1.0)), 1.0), 1.0)
+            hold_mult = _clamp(hold_mult, min(float(getattr(config, "COOLDOWN_HOLD_RELAX_MULT", 1.0)), 1.0), 1.0)
+            turnover_budget = self.initial_cash * self.turnover_budget_multiplier
+            turnover_ratio = float(sum(self._turnover_window)) / max(turnover_budget, 1e-6)
+            sens = float(getattr(config, "COOLDOWN_TURNOVER_SENSITIVITY", 0.0))
+            scale = 1.0 + max(0.0, turnover_ratio - 1.0) * max(0.0, sens)
+            eff_gap = int(round(base_gap * gap_mult * scale))
+            eff_hold = int(round(base_hold * hold_mult * scale))
+            eff_gap = max(eff_gap, int(getattr(config, "COOLDOWN_MIN_GAP_FLOOR", 0)))
+            eff_hold = max(eff_hold, int(getattr(config, "COOLDOWN_MIN_HOLD_FLOOR", 0)))
+        gap_ok = self.last_trade_step < 0 or (self.steps - self.last_trade_step) >= eff_gap
+        hold_ok = self.last_entry_step < 0 or (self.steps - self.last_entry_step) >= eff_hold
+        since_last_trade = (self.steps - self.last_trade_step) if self.last_trade_step >= 0 else 10**9
+        # In stuck mode, allow limited relaxation of the trade-gap constraint (never below the floor).
+        gap_floor = int(getattr(config, "COOLDOWN_MIN_GAP_FLOOR", 0))
+        stuck_gap_ok = bool(stuck_relax) and (since_last_trade >= gap_floor)
+
+        allowed_actions = ["hold"]
+        # Allow BUY when flat; optionally allow *limited* scaling-in via MAX_BUY_LEGS_PER_POSITION.
+        if self.portfolio.cash > 0:
+            if self.portfolio.position <= 0:
+                # If we're inside the trade-gap cooldown, do not even offer BUY to the agent.
+                # This prevents thousands of doomed BUY proposals (cooldown_gap blocks).
+                if warmup_active or gap_ok or stuck_gap_ok:
+                    allowed_actions.append("buy")
+            else:
+                max_legs = int(getattr(config, "MAX_BUY_LEGS_PER_POSITION", 1))
+                if max_legs > 1 and self._buy_legs_current < max_legs:
+                    if warmup_active or gap_ok or stuck_gap_ok:
+                        allowed_actions.append("buy")
+        if self.portfolio.position > 0:
+            # SELL: do not offer during trade-gap cooldown unless it qualifies for a strong-exit bypass.
+            # This prevents the recurring "proposed SELL >> executed SELL" mismatch.
+            if warmup_active or gap_ok or stuck_gap_ok:
+                allowed_actions.append("sell")
+            else:
+                # Only allow if we can at least satisfy the strong-min-gap requirement;
+                # the actual edge check happens after we compute margins from sampled scores.
+                since_last_trade = (self.steps - self.last_trade_step) if self.last_trade_step >= 0 else 10**9
+                strong_min_gap = int(getattr(config, 'COOLDOWN_STRONG_MIN_GAP_STEPS', 0))
+                strong_min_gap = min(strong_min_gap, max(eff_gap, int(getattr(config, "COOLDOWN_MIN_GAP_FLOOR", 0))))
+                if since_last_trade >= strong_min_gap:
+                    allowed_actions.append("sell")
+
+        # (moved earlier) stuck adaptation + regime edge adjustment are computed before action masking
 
         action, sampled_scores, means = self.agent.act_with_scores(
             features,
@@ -459,40 +595,78 @@ class Trainer:
             posterior_scale_override=posterior_scale_effective,
         )
 
-        proposed_action = action
-        self._proposed_action_counter[proposed_action] += 1
+        # --- cost-aware + cooldown-aware action masking (prevents spam) --------
+        # Goal: keep *proposed* actions aligned with what can actually execute, so the
+        # agent doesn't learn to "ask" for trades that will be vetoed by costs/cooldowns.
         hold_idx = ACTIONS.index("hold")
-        # Normalize raw score margins into tanh-space.
-        # IMPORTANT: if this scale is too large, margins collapse toward 0 and cost gating
-        # will block most BUY/SELL proposals (HOLD-heavy).
         margin_scale = max(config.WEIGHT_CLIP * float(getattr(config, "MARGIN_SCALE_MULT", 1.0)), 1e-9)
         buy_margin_raw = sampled_scores[ACTIONS.index("buy")] - sampled_scores[hold_idx]
         sell_margin_raw = sampled_scores[ACTIONS.index("sell")] - sampled_scores[hold_idx]
         buy_margin = math.tanh(buy_margin_raw / margin_scale)
         sell_margin = math.tanh(sell_margin_raw / margin_scale)
+
+        if config.COST_AWARE_GATING:
+            est_cost = (config.FEE_RATE + config.SLIPPAGE_RATE + config.GATE_SAFETY_MARGIN)
+            if stuck_relax:
+                # In stuck mode, require only raw estimated costs (+ safety), not the multiplied threshold.
+                cost_edge = max(edge_threshold, est_cost + config.EDGE_SAFETY_MARGIN)
+            else:
+                cost_edge = max(edge_threshold, config.COST_EDGE_MULT * est_cost) + config.EDGE_SAFETY_MARGIN
+        else:
+            cost_edge = edge_threshold
+
+        if not warmup_active:
+            feasible = list(allowed_actions)
+
+            # 1) Cost feasibility: do not propose trades that do not clear cost_edge.
+            if "buy" in feasible and buy_margin < cost_edge:
+                feasible.remove("buy")
+            if "sell" in feasible and sell_margin < cost_edge:
+                feasible.remove("sell")
+
+            # 2) Cooldown feasibility for SELL: if we are inside the trade-gap cooldown,
+            # only allow SELL proposals when they qualify for the strong-exit bypass.
+            if "sell" in feasible and (not gap_ok) and (not stuck_relax):
+                strong_min_gap = int(getattr(config, 'COOLDOWN_STRONG_MIN_GAP_STEPS', 0))
+                strong_min_gap = min(strong_min_gap, max(eff_gap, int(getattr(config, "COOLDOWN_MIN_GAP_FLOOR", 0))))
+                min_gap_ok = since_last_trade >= strong_min_gap
+                bypass_allowed = True if config.COOLDOWN_BYPASS_SELL_ONLY else True
+                strong_sell = (sell_margin >= (config.COOLDOWN_STRONG_EDGE_MULT * cost_edge)) and bypass_allowed and min_gap_ok
+                if not strong_sell:
+                    feasible.remove("sell")
+
+            # Ensure HOLD is always present.
+            if "hold" not in feasible:
+                feasible.append("hold")
+            if action not in feasible:
+                # re-pick best among feasible using the same sampled scores
+                idxs = [ACTIONS.index(a) for a in feasible]
+                best_val = float(np.max(sampled_scores[idxs]))
+                cands = [a for a in feasible if float(sampled_scores[ACTIONS.index(a)]) == best_val]
+                action = str(np.random.choice(cands))
+
+        proposed_action = action
+        self._proposed_action_counter[proposed_action] += 1
+        # buy_margin/sell_margin already computed above from sampled_scores
         edge_margin = buy_margin if proposed_action == "buy" else sell_margin if proposed_action == "sell" else 0.0
 
         hold_reason: str | None = None
         gate_blocked = False
         timing_blocked = False
         budget_blocked = False
-        warmup_active = self.agent.state.trades < config.WARMUP_TRADES_BEFORE_GATING
 
         # --- cost-aware gating -------------------------------------------------
-        # 1m data is very fee/slippage sensitive. Require edge to beat estimated
-        # all-in costs (in tanh-space) before allowing BUY/SELL.
+        # In stuck mode, do not re-veto here (we already softened the threshold above).
         if config.COST_AWARE_GATING:
-            # Estimated all-in cost in *fraction of notional* (fees + friction + safety margin).
-            # We then convert it into tanh-space via COST_EDGE_MULT and add a *single* edge safety margin.
-            # (Avoid double-counting safety buffers; that can cause HOLD-freeze.)
-            est_cost = (
-                config.FEE_RATE + config.TURNOVER_PENALTY + config.SLIPPAGE_RATE + config.GATE_SAFETY_MARGIN
-            )
-            cost_edge = max(edge_threshold, config.COST_EDGE_MULT * est_cost) + config.EDGE_SAFETY_MARGIN
+            est_cost = (config.FEE_RATE + config.SLIPPAGE_RATE + config.GATE_SAFETY_MARGIN)
+            if stuck_relax:
+                cost_edge = max(edge_threshold, est_cost + config.EDGE_SAFETY_MARGIN)
+            else:
+                cost_edge = max(edge_threshold, config.COST_EDGE_MULT * est_cost) + config.EDGE_SAFETY_MARGIN
         else:
             cost_edge = edge_threshold
 
-        if not warmup_active:
+        if (not warmup_active) and (not stuck_relax):
             if action == "buy" and buy_margin < cost_edge:
                 action = "hold"
                 hold_reason = "cost_gate"
@@ -507,76 +681,11 @@ class Trainer:
                 self._gate_reason_counter["cost_gate"] += 1
 
         # --- adaptive cooldown (regime + turnover aware) ----------------------
-        base_gap = int(getattr(config, "MIN_TRADE_GAP_STEPS", 0))
-        base_hold = int(getattr(config, "MIN_HOLD_STEPS", 0))
-        eff_gap = base_gap
-        eff_hold = base_hold
-        if getattr(config, "ENABLE_ADAPTIVE_COOLDOWN", False):
-            # volatility percentile in [0,1] (if missing, fall back to neutral 0.5).
-            vol_col = getattr(config, "COOLDOWN_VOL_COL", getattr(config, "REGIME_EDGE_VOL_COL", ""))
-            # Prefer a true percentile column if present; otherwise derive a volatility proxy from returns.
-            use_proxy = True
-            if vol_col:
-                try:
-                    raw_v = row.get(vol_col, None)
-                    if raw_v is not None and np.isfinite(raw_v):
-                        v = float(raw_v)
-                        # If it already looks like a percentile, use it.
-                        if 0.0 <= v <= 1.0:
-                            vol_pct = v
-                            use_proxy = False
-                except Exception:
-                    pass
-            if use_proxy:
-                # Proxy: EMA of absolute returns, normalized and squashed to [0,1].
-                ret = 0.0
-                if self._last_price is not None and self._last_price > 0:
-                    ret = abs(price_now / self._last_price - 1.0)
-                decay = float(getattr(config, 'ADAPTIVE_COOLDOWN_RET_EMA_DECAY', 0.05))
-                decay = _clamp(decay, 0.0, 1.0)
-                # initialize on first use
-                if not hasattr(self, '_absret_ema'):
-                    self._absret_ema = ret
-                else:
-                    self._absret_ema = (1 - decay) * float(self._absret_ema) + decay * ret
-                base = max(float(getattr(self, '_absret_ema', 0.0)), 1e-12)
-                ratio = ret / base
-                # map ratio -> [0,1] smoothly; ratio ~1 => ~0.5
-                vol_pct = 0.5 * (1.0 + math.tanh((ratio - 1.0) / 1.5))
-            vol_pct = _clamp(float(vol_pct), 0.0, 1.0)
-            low = float(getattr(config, "COOLDOWN_VOL_LOW_PCT", 0.30))
-            high = float(getattr(config, "COOLDOWN_VOL_HIGH_PCT", 0.70))
-            # multiplier: low vol => tighten, high vol => relax, linear in-between
-            if vol_pct <= low:
-                gap_mult = float(getattr(config, "COOLDOWN_GAP_TIGHTEN_MULT", 1.0))
-                hold_mult = float(getattr(config, "COOLDOWN_HOLD_TIGHTEN_MULT", 1.0))
-            elif vol_pct >= high:
-                gap_mult = float(getattr(config, "COOLDOWN_GAP_RELAX_MULT", 1.0))
-                hold_mult = float(getattr(config, "COOLDOWN_HOLD_RELAX_MULT", 1.0))
-            else:
-                t = (vol_pct - low) / max(high - low, 1e-9)
-                gap_mult = (1 - t) * float(getattr(config, "COOLDOWN_GAP_TIGHTEN_MULT", 1.0)) + t * float(getattr(config, "COOLDOWN_GAP_RELAX_MULT", 1.0))
-                hold_mult = (1 - t) * float(getattr(config, "COOLDOWN_HOLD_TIGHTEN_MULT", 1.0)) + t * float(getattr(config, "COOLDOWN_HOLD_RELAX_MULT", 1.0))
-            # Ensure regime adaptation never *lengthens* beyond the base cooldowns.
-            # (Lengthening by regime pushes the system into the HOLD-freeze pathology.)
-            # We still allow turnover-based scaling to lengthen cooldowns only when turnover is stressed.
-            gap_mult = _clamp(gap_mult, min(float(getattr(config, "COOLDOWN_GAP_RELAX_MULT", 1.0)), 1.0), 1.0)
-            hold_mult = _clamp(hold_mult, min(float(getattr(config, "COOLDOWN_HOLD_RELAX_MULT", 1.0)), 1.0), 1.0)
+        # NOTE: eff_gap/eff_hold and gap_ok/hold_ok are computed earlier (before act())
+        # so the agent only sees timing-feasible actions. We keep using the computed
+        # gap_ok/hold_ok here for the final enforcement step below.
 
-            # turnover scaling: if turnover exceeds budget, lengthen cooldowns
-            turnover_budget = self.initial_cash * self.turnover_budget_multiplier
-            turnover_ratio = float(sum(self._turnover_window)) / max(turnover_budget, 1e-6)
-            sens = float(getattr(config, "COOLDOWN_TURNOVER_SENSITIVITY", 0.0))
-            scale = 1.0 + max(0.0, turnover_ratio - 1.0) * max(0.0, sens)
-            eff_gap = int(round(base_gap * gap_mult * scale))
-            eff_hold = int(round(base_hold * hold_mult * scale))
-            # Floors ensure there is never a full "bypass" loophole.
-            eff_gap = max(eff_gap, int(getattr(config, "COOLDOWN_MIN_GAP_FLOOR", 0)))
-            eff_hold = max(eff_hold, int(getattr(config, "COOLDOWN_MIN_HOLD_FLOOR", 0)))
-        gap_ok = self.last_trade_step < 0 or (self.steps - self.last_trade_step) >= eff_gap
-        hold_ok = self.last_entry_step < 0 or (self.steps - self.last_entry_step) >= eff_hold
-
-        if not warmup_active:
+        if (not warmup_active) and (not stuck_relax):
             # Cooldown gating: enforce minimum spacing between trades.
             # We allow a *very conservative* bypass only for strong, risk-reducing exits,
             # and even then we keep a small minimum gap to prevent churn spirals.
@@ -598,9 +707,10 @@ class Trainer:
                 hold_reason = hold_reason or "cooldown_gap"
                 timing_blocked = True
                 self.timing_blocks += 1
-            if action == "sell" and ((not gap_ok) or (not hold_ok)) and (not strong_cooldown_ok):
+            # Exits should not be trapped by a minimum-hold timer; only enforce trade-gap spacing.
+            if action == "sell" and (not gap_ok) and (not strong_cooldown_ok):
                 action = "hold"
-                hold_reason = hold_reason or "cooldown_hold"
+                hold_reason = hold_reason or "cooldown_gap"
                 timing_blocked = True
                 self.timing_blocks += 1
 
@@ -657,26 +767,40 @@ class Trainer:
             except Exception:
                 vol_pct, spr_pct = float('nan'), float('nan')
             if np.isfinite(vol_pct) and np.isfinite(spr_pct):
+                vol_pct = self._sanitize_unit_percentile(vol_pct, col="rv1m_pct_5m")
+                spr_pct = self._sanitize_unit_percentile(spr_pct, col="spread_pct_5m")
                 if action == "buy":
                     # BUY: avoid low-vol chop and high-spread microstructure, but do not hard-freeze the system.
-                    # High spread remains a hard block. Low vol tightens the required edge instead of a veto.
-                    if spr_pct > float(config.MTF_SPREAD_PCT_MAX):
+                    # Extreme spread is a hard block; moderate spread tightens the edge requirement.
+                    hard = float(getattr(config, "MTF_SPREAD_PCT_HARD", 1.0))
+                    soft = float(getattr(config, "MTF_SPREAD_PCT_MAX", 1.0))
+                    if spr_pct > hard:
                         action = "hold"
-                        hold_reason = hold_reason or "mtf_buy_spread"
+                        hold_reason = hold_reason or "mtf_buy_spread_hard"
                         gate_blocked = True
                         self.gate_blocks += 1
-                        self._gate_reason_counter["mtf_buy_spread"] += 1
+                        self._gate_reason_counter["mtf_buy_spread_hard"] += 1
                     else:
+                        # Start from the low-vol multiplier, then optionally tighten further for high spread.
+                        req_mult = 1.0
                         lowvol = vol_pct < float(getattr(config, "MTF_VOL_PCT_MIN", 0.0))
                         if lowvol:
-                            edge_mult = float(getattr(config, "MTF_LOWVOL_EDGE_MULT", 1.0))
-                            # Require a meaningfully stronger edge in low-vol regimes instead of blocking outright.
-                            if buy_margin < (edge_mult * cost_edge):
-                                action = "hold"
-                                hold_reason = hold_reason or "mtf_buy_lowvol"
-                                gate_blocked = True
-                                self.gate_blocks += 1
-                                self._gate_reason_counter["mtf_buy_lowvol"] += 1
+                            req_mult = max(req_mult, float(getattr(config, "MTF_LOWVOL_EDGE_MULT", 1.0)))
+                        if spr_pct > soft:
+                            req_mult = max(req_mult, float(getattr(config, "MTF_HIGHSPREAD_EDGE_MULT", 1.0)))
+                        if req_mult > 1.0 and buy_margin < (req_mult * cost_edge):
+                            action = "hold"
+                            # Distinguish which condition tightened the requirement for better tuning.
+                            if spr_pct > soft and lowvol:
+                                reason = "mtf_buy_lowvol_highspread"
+                            elif spr_pct > soft:
+                                reason = "mtf_buy_highspread"
+                            else:
+                                reason = "mtf_buy_lowvol"
+                            hold_reason = hold_reason or reason
+                            gate_blocked = True
+                            self.gate_blocks += 1
+                            self._gate_reason_counter[reason] += 1
                 else:
                     # SELL: do NOT trap exits in calm regimes. Only block if spreads are extreme
                     # and the sell edge is weak (i.e., not clearly worth crossing the spread).
@@ -707,6 +831,29 @@ class Trainer:
                     hold_reason = hold_reason or "turnover_budget"
                     budget_blocked = True
                     self.budget_blocks += 1
+
+        # --- trade-rate throttling (anti-churn) -------------------------------
+        # Count executed trade *legs* over a rolling step window and stop opening
+        # new exposure when the policy is churning. This complements cooldowns:
+        # cooldowns prevent immediate flip-flops; this prevents slow fee bleed.
+        tr_window = int(getattr(config, 'TRADE_RATE_WINDOW_STEPS', 0) or 0)
+        tr_max = int(getattr(config, 'MAX_TRADES_PER_WINDOW', 0) or 0)
+        if (not warmup_active) and (not stuck_relax) and tr_window > 0 and tr_max > 0 and action in ("buy", "sell"):
+            recent_trades = int(sum(getattr(self, '_trade_count_window', [])))
+            if recent_trades >= tr_max:
+                if action == "buy":
+                    action = "hold"
+                    hold_reason = hold_reason or "trade_rate"
+                    budget_blocked = True
+                    self.budget_blocks += 1
+                elif action == "sell":
+                    mult = float(getattr(config, 'TRADE_RATE_SELL_BYPASS_EDGE_MULT', 3.0))
+                    if sell_margin < (mult * cost_edge):
+                        action = "hold"
+                        hold_reason = hold_reason or "trade_rate"
+                        budget_blocked = True
+                        self.budget_blocks += 1
+
         trade_executed = False
         fee_paid = 0.0
         turnover_penalty = 0.0
@@ -727,9 +874,11 @@ class Trainer:
             # IMPORTANT: do NOT bypass cost gating; only bypass the *edge confidence* gate
             # (and still respect timing locks) so this doesn't become a churn/cost bypass.
             if config.COST_AWARE_GATING:
+                # IMPORTANT: TURNOVER_PENALTY is a *learning regularizer*, not an execution cost.
+                # Do not include it in cost-aware gating, otherwise the strategy gets over-conservative
+                # and HOLD-freezes (especially on 1m).
                 est_cost = (
                     config.FEE_RATE
-                    + config.TURNOVER_PENALTY
                     + config.SLIPPAGE_RATE
                     + config.GATE_SAFETY_MARGIN
                 )
@@ -738,31 +887,41 @@ class Trainer:
                 stuck_cost_edge = max(edge_threshold, est_cost + config.EDGE_SAFETY_MARGIN)
             else:
                 stuck_cost_edge = edge_threshold
-            if proposed_action == "buy" and cash_before > 0 and gap_ok and buy_margin >= stuck_cost_edge:
+            if proposed_action == "buy" and cash_before > 0 and (gap_ok or stuck_gap_ok) and buy_margin >= stuck_cost_edge:
                 action = "buy"
                 hold_reason = None
                 gate_blocked = False
             elif (
                 proposed_action == "sell"
                 and position_before > 0
-                and gap_ok
-                and hold_ok
+                and (gap_ok or stuck_gap_ok)
                 and sell_margin >= stuck_cost_edge
             ):
                 action = "sell"
                 hold_reason = None
                 gate_blocked = False
 
-        # --- execution (fees applied; turnover penalty applied) ----------------
+        # --- execution ---------------------------------------------------------
+        # Professional separation of frictions:
+        # - fee_paid + slippage_paid are *execution costs* (affect portfolio value)
+        # - turnover_penalty is a *learning regularizer* (does NOT affect portfolio value; applied in trainer_reward)
         if action == "buy" and cash_before > 0:
             pos_frac = self._dynamic_fraction(buy_margin)
             trade_cash = cash_before * pos_frac
+            # Avoid micro-buys that are almost entirely fees/slippage on 1m data.
+            min_notional = float(getattr(config, 'MIN_TRADE_NOTIONAL', 0.0) or 0.0)
+            if min_notional > 0.0 and trade_cash < min_notional:
+                action = "hold"
+                hold_reason = hold_reason or "min_notional"
+                budget_blocked = True
+                trade_cash = 0.0
 
             # penalties applied ONCE by shrinking shares (keep cash outlay = trade_cash)
             fee_paid = trade_cash * config.FEE_RATE
-            turnover_penalty = trade_cash * config.TURNOVER_PENALTY
             slippage_paid = trade_cash * config.SLIPPAGE_RATE
-            investable = trade_cash - fee_paid - turnover_penalty - slippage_paid
+            # NOTE: turnover_penalty is a learning regularizer (applied later in trainer_reward),
+            # not an execution cash cost.
+            investable = trade_cash - fee_paid - slippage_paid
             cash_outlay = trade_cash  # <-- no "+ turnover_penalty" here
 
             if investable > 0 and cash_outlay <= cash_before:
@@ -783,6 +942,9 @@ class Trainer:
 
                 if prior_pos == 0:
                     self.portfolio.entry_value = value_before
+                    self._buy_legs_current = 1
+                else:
+                    self._buy_legs_current += 1
 
                 self.last_trade_step = self.steps
                 self.last_entry_step = self.steps
@@ -790,7 +952,7 @@ class Trainer:
                 # DEBUG (optional): verify the immediate MTM impact of this BUY
                 # Why: catches any hidden re-charges or double counting early.
                 trade_impact = self.portfolio.value(price_now) - value_before
-                expected_impact = -(fee_paid + turnover_penalty + slippage_paid)
+                expected_impact = -(fee_paid + slippage_paid)
                 if abs(trade_impact - expected_impact) > 1e-6:
                     print(
                         f"[warn] buy impact mismatch: got {trade_impact:.6f}, expected {expected_impact:.6f}"
@@ -801,6 +963,7 @@ class Trainer:
                 budget_blocked = True
                 fee_paid = 0.0
                 turnover_penalty = 0.0
+                slippage_paid = 0.0
 
         elif action == "sell" and position_before > 0:
             sell_frac = self._dynamic_fraction(sell_margin) if config.PARTIAL_SELLS else 1.0
@@ -818,11 +981,30 @@ class Trainer:
                 # stash entry price BEFORE mutating portfolio (needed for per-leg win-rate)
                 entry_price_for_leg = self.portfolio.entry_price
                 gross_proceeds = trade_size * price_now
-                fee_paid = gross_proceeds * config.FEE_RATE
-                turnover_penalty = gross_proceeds * config.TURNOVER_PENALTY
+                # Avoid micro-sells that are dominated by friction unless we're closing a dust position.
+                min_notional = float(getattr(config, 'MIN_TRADE_NOTIONAL', 0.0) or 0.0)
+                if min_notional > 0.0 and gross_proceeds < min_notional:
+                    full_notional = position_before * price_now
+                    # If the whole position is tiny (dust-ish), just close it; otherwise skip the micro-sell.
+                    if full_notional <= max(min_notional, float(getattr(config, 'DUST_POSITION_NOTIONAL', 0.0) or 0.0)):
+                        trade_size = position_before
+                        gross_proceeds = trade_size * price_now
+                    else:
+                        trade_executed = False
+                        action = "hold"
+                        hold_reason = hold_reason or "min_notional"
+                        budget_blocked = True
+                        fee_paid = 0.0
+                        slippage_paid = 0.0
+                        notional_traded = 0.0
+                        trade_size = 0.0
+                if action == "sell":
+                    fee_paid = gross_proceeds * config.FEE_RATE
                 slippage_paid = gross_proceeds * config.SLIPPAGE_RATE
+                # NOTE: turnover_penalty is a learning regularizer (applied later in trainer_reward),
+                # not an execution cash cost.
                 notional_traded = gross_proceeds
-                net = gross_proceeds - fee_paid - turnover_penalty - slippage_paid
+                net = gross_proceeds - fee_paid - slippage_paid
                 self.portfolio.cash += net
                 self.portfolio.position = position_before - trade_size
                 fully_closed = self.portfolio.position <= 1e-12
@@ -831,6 +1013,7 @@ class Trainer:
                     self.portfolio.entry_price = 0.0
                     self.portfolio.entry_value = 0.0
                     self.last_entry_step = -1
+                    self._buy_legs_current = 0
                 else:
                     # keep entry_value; basis unchanged for remaining units
                     pass
@@ -848,17 +1031,52 @@ class Trainer:
             self._hold_reason_counter[hold_reason] += 1
 
         # --- reward & penalties ------------------------------------------------
-        # Post-trade portfolio value at the *current* price (after fees/slippage).
-        # Using this as the reward baseline prevents SELL from being structurally
-        # penalized (fees hit on the sell, while MTM PnL was already present in
-        # value_before).
+        # IMPORTANT ALIGNMENT NOTE:
+        # We track portfolio performance in two places:
+        #   - total_return / equity_curve (includes execution frictions immediately)
+        #   - sharpe_ratio from _return_history
+        # Historically, _return_history used (value_next - value_after), which *excluded* the
+        # immediate fee/slippage hit at the execution step. That can produce a confusing
+        # situation where Sharpe looks great while total_return is deeply negative (fee-death-by-churn).
+        #
+        # To align learning + reporting, we define the step reward as the change from the
+        # *pre-trade* mark-to-market value at price_now to the next mark-to-market value.
+        # This includes execution frictions in the same step they occur and makes Sharpe and
+        # total_return consistent diagnostics.
         value_after = self.portfolio.value(price_now)
         value_next = self.portfolio.value(price_next)
         self._log_action(action)
-        reward = value_next - value_after
-        step_return = reward / max(value_after, 1e-6)
+        # pre-trade -> next-step value change (includes fee/slippage impact when trade happens)
+        reward = value_next - value_before
+
+        # --- directional shaping (flat-state curriculum signal) ---------------
+        # When flat, portfolio PnL is often exactly 0, which can slow learning of entry timing.
+        # Add a *small*, clipped term based on the next-bar return when FLAT only.
+        # This never affects portfolio value; it only shapes the learning signal.
+        if getattr(config, 'ENABLE_DIRECTIONAL_SHAPING', False) and position_before <= 0 and cash_before > 0:
+            try:
+                next_ret = (price_next / max(price_now, 1e-9)) - 1.0
+            except Exception:
+                next_ret = 0.0
+            w = float(getattr(config, 'DIRECTIONAL_SHAPING_WEIGHT', 0.0))
+            miss_w = float(getattr(config, 'FLAT_HOLD_MISS_PENALTY_WEIGHT', 0.0))
+            clip_frac = float(getattr(config, 'DIRECTIONAL_SHAPING_CLIP', 0.0))
+            clip_val = max(0.0, clip_frac) * self.initial_cash
+            shaped = 0.0
+            if action == 'buy':
+                shaped = w * self.initial_cash * float(next_ret)
+            elif action == 'hold':
+                shaped = -miss_w * self.initial_cash * abs(float(next_ret))
+            if clip_val > 0.0:
+                shaped = _clamp(shaped, -clip_val, clip_val)
+            reward += shaped
+
+        step_return = reward / max(value_before, 1e-6)
         self._return_history.append(step_return)
         self._turnover_window.append(notional_traded)
+        # Trade-rate window: track executed trade legs to throttle slow churn on 1m.
+        if hasattr(self, '_trade_count_window') and getattr(self._trade_count_window, 'maxlen', 0):
+            self._trade_count_window.append(1 if trade_executed else 0)
         self.total_notional_traded += float(notional_traded)
         self._update_adaptive_risk_controls()
 
@@ -875,13 +1093,47 @@ class Trainer:
         turnover_budget = self.initial_cash * self.turnover_budget_multiplier
         turnover_over = max(0.0, sum(self._turnover_window) - turnover_budget)
         to_penalty_value = (turnover_over / max(turnover_budget, 1e-6)) * self.initial_cash * to_penalty_rate
-        risk_penalty_value = dd_penalty_value + to_penalty_value
+
+        # Turnover penalty: apply a *per-trade* learning regularizer based on this step's notional.
+        # This is separate from the turnover budget penalty above (which activates only when the
+        # rolling window exceeds the budget).
+        turnover_penalty = float(notional_traded) * float(getattr(config, "TURNOVER_PENALTY", 0.0))
+
+        # Penalize infeasible proposals: agent proposed BUY/SELL but guards converted to HOLD.
+        blocked_penalty = 0.0
+        if proposed_action in ("buy", "sell") and action == "hold":
+            if gate_blocked:
+                blocked_penalty += float(getattr(config, "BLOCKED_GATE_PENALTY", 0.0)) * self.initial_cash
+            if timing_blocked:
+                blocked_penalty += float(getattr(config, "BLOCKED_TIMING_PENALTY", 0.0)) * self.initial_cash
+            if budget_blocked:
+                blocked_penalty += float(getattr(config, "BLOCKED_BUDGET_PENALTY", 0.0)) * self.initial_cash
+
+        risk_penalty_value = dd_penalty_value + to_penalty_value + turnover_penalty + blocked_penalty
 
         trainer_reward = reward - risk_penalty_value
 
-        # ---- Improved reward strategy (bounded + variance-reduced) -----------
+        # ---- Reward shaping (bounded + variance-reduced) ---------------------
         # 1) convert to pct-of-initial-cash (stable scale)
-        pct = trainer_reward / max(self.initial_cash, 1e-6)
+        pct_raw = trainer_reward / max(self.initial_cash, 1e-6)
+
+        # Optional: blend raw reward with a volatility-normalised component.
+        # This makes REWARD_RISK_BLEND / REWARD_STABILITY_* config knobs real,
+        # and stabilises learning across regime shifts without changing the sign
+        # of the learning signal in normal conditions.
+        pct = pct_raw
+        blend = float(getattr(config, "REWARD_RISK_BLEND", 0.0))
+        if blend > 0.0:
+            window = int(getattr(config, "REWARD_STABILITY_WINDOW", 0))
+            min_obs = int(getattr(config, "REWARD_STABILITY_MIN_OBS", 0))
+            if window > 1 and len(self._return_history) >= max(min_obs, 2):
+                recent = list(self._return_history)[-window:]
+                vol = float(np.std(np.asarray(recent, dtype=float)))
+                target = max(float(getattr(config, "ADAPTIVE_TARGET_RETURN_VOL", 1e-6)), 1e-6)
+                denom = max(vol, target, 1e-6)
+                pct_volnorm = pct_raw * (target / denom)
+                b = max(0.0, min(1.0, blend))
+                pct = (1.0 - b) * pct_raw + b * pct_volnorm
 
         # 2) advantage baseline (EMA) to reduce variance; does not change optimum
         if config.USE_ADVANTAGE_BASELINE:
@@ -891,7 +1143,9 @@ class Trainer:
 
         # 3) normalize by an EMA of advantage variance (stabilizes posterior updates)
         if config.USE_REWARD_STD_NORMALIZATION:
-            decay = _clamp(config.BASELINE_EMA_DECAY, 0.0, 1.0)
+            # Use a dedicated decay for the variance estimator; defaults to BASELINE_EMA_DECAY
+            # so existing behaviour remains unchanged unless you tune it explicitly.
+            decay = _clamp(float(getattr(config, "REWARD_VAR_EMA_DECAY", config.BASELINE_EMA_DECAY)), 0.0, 1.0)
             self._reward_var_ema = (1 - decay) * self._reward_var_ema + decay * (advantage * advantage)
             sigma = math.sqrt(max(self._reward_var_ema, config.REWARD_SIGMA_FLOOR ** 2))
             advantage = advantage / sigma
