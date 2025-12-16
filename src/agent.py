@@ -1,6 +1,7 @@
 # src/agent.py
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, asdict, field
 from datetime import datetime
@@ -21,6 +22,14 @@ FEATURE_COLUMNS = INDICATOR_COLUMNS + [
     "time_since_trade",
 ]
 
+def compute_feature_set_id(cols: list[str]) -> str:
+    """Deterministic identifier for a feature set.
+
+    Used to make feature migrations explicit and traceable across runs.
+    """
+    payload = "\n".join(cols).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:12]
+
 @dataclass
 class AgentState:
     q_values: List[float]
@@ -36,6 +45,9 @@ class AgentState:
     symbol: str = ""
     timeframe: str = ""
     saved_at_utc: str = ""
+    # Explicit feature versioning (separate from AgentState.version)
+    feature_set_id: str = ""
+    feature_set_version: int = 1
     feature_clip: float = config.FEATURE_CLIP
     weight_clip: float = config.WEIGHT_CLIP
     ridge_factor: float = config.RIDGE_FACTOR
@@ -52,6 +64,8 @@ class AgentState:
             cov_inv_matrices=[(np.eye(size, dtype=float) / config.RIDGE_FACTOR).tolist() for _ in ACTIONS],
             bias_vectors=[[0.0 for _ in FEATURE_COLUMNS] for _ in ACTIONS],
             last_epsilon=config.POSTERIOR_SCALE,
+            feature_set_id=compute_feature_set_id(FEATURE_COLUMNS),
+            feature_set_version=1,
             indicator_columns=FEATURE_COLUMNS[:],
         )
 
@@ -79,6 +93,8 @@ class AgentState:
         data.setdefault("version", 4)
         for k in ("run_id", "symbol", "timeframe", "saved_at_utc"):
             data.setdefault(k, "")
+        data.setdefault("feature_set_id", "")
+        data.setdefault("feature_set_version", 0)
         data.setdefault("feature_clip", config.FEATURE_CLIP)
         data.setdefault("weight_clip", config.WEIGHT_CLIP)
         data.setdefault("ridge_factor", config.RIDGE_FACTOR)
@@ -223,13 +239,29 @@ class BanditAgent:
         self._recompute_weights()
 
     def _prepare_state(self) -> None:
+        # Feature ordering is persisted in state.indicator_columns.
+        # We additionally persist a feature_set_id hash to make migrations explicit.
+        current_id = compute_feature_set_id(FEATURE_COLUMNS)
+
         self._feature_size = len(self.state.indicator_columns) or len(FEATURE_COLUMNS)
         if not self.state.indicator_columns:
             self.state.indicator_columns = FEATURE_COLUMNS[:]
-        if self.state.indicator_columns != FEATURE_COLUMNS:
+
+        needs_migration = (
+            (getattr(self.state, "feature_set_id", "") != current_id)
+            or (self.state.indicator_columns != FEATURE_COLUMNS)
+        )
+        if needs_migration:
+            old_id = getattr(self.state, "feature_set_id", "")
+            print(f"[info] feature set changed: {old_id or 'unknown'} -> {current_id}; migrating weights")
             self._migrate_weights()
+            self.state.feature_set_id = current_id
+            self.state.feature_set_version = int(getattr(self.state, "feature_set_version", 0) or 0) + 1
         else:
+            self.state.feature_set_id = current_id
+            self.state.feature_set_version = int(getattr(self.state, "feature_set_version", 0) or 0) or 1
             self._feature_size = len(self.state.indicator_columns) or len(FEATURE_COLUMNS)
+
         self._ensure_covariance_shape()
         self._ensure_bias_shape()
         if len(self.state.weights) != len(ACTIONS):

@@ -50,6 +50,8 @@ class StepResult:
     realized_pnl: float
     edge_margin: float
     hold_reason: str | None
+    forced_exit: bool = False
+    forced_exit_reason: str | None = None
     gate_blocked: bool = False
     timing_blocked: bool = False
     budget_blocked: bool = False
@@ -185,6 +187,9 @@ class Trainer:
         self._hold_reason_counter: Counter[str] = Counter()
         # Gate diagnostics: which gate type blocked (cost, mtf, etc.).
         self._gate_reason_counter: Counter[str] = Counter()
+        # Hard risk-exit diagnostics (forced exits; off by default).
+        self.forced_exit_count: int = 0
+        self._forced_exit_reason_counter: Counter[str] = Counter()
         self._turnover_window: deque[float] = deque(maxlen=config.TURNOVER_BUDGET_WINDOW)
         # Separate anti-churn window: count executed trade legs (not notional)
         self._trade_count_window: deque[int] = deque(maxlen=int(getattr(config, 'TRADE_RATE_WINDOW_STEPS', 0) or 0))
@@ -227,6 +232,8 @@ class Trainer:
         self._proposed_action_counter.clear()
         self._hold_reason_counter.clear()
         self._gate_reason_counter.clear()
+        self.forced_exit_count = 0
+        self._forced_exit_reason_counter.clear()
         self._turnover_window.clear()
         if hasattr(self, '_trade_count_window'):
             self._trade_count_window.clear()
@@ -488,6 +495,39 @@ class Trainer:
         # Disabled when stuck_relax is active (we already loosen gates there).
         edge_threshold = self._regime_adjust_edge(row, edge_threshold, stuck_relax=stuck_relax)
 
+        # ------------------------------------------------------------------
+        # Hard risk exits (optional): evaluate BEFORE policy action.
+        #
+        # This is intentionally not "gating". It is a risk overlay that can
+        # override the policy to cut tail risk. It is OFF by default.
+        # ------------------------------------------------------------------
+        forced_exit = False
+        forced_exit_reason: str | None = None
+        forced_action: str | None = None
+        if getattr(config, "ENABLE_HARD_RISK_EXITS", False) and self.portfolio.position > 0:
+            entry = float(self.portfolio.entry_price or 0.0)
+            if entry > 0:
+                unreal = (price_now / entry) - 1.0
+                hold_steps = (self.steps - self.last_entry_step) if self.last_entry_step >= 0 else 0
+                if hold_steps >= int(getattr(config, "MAX_POSITION_HOLD_STEPS", 10**9)):
+                    forced_action = "sell"
+                    forced_exit_reason = "time_stop"
+                if unreal <= -float(getattr(config, "STOP_LOSS_PCT", 0.0)):
+                    forced_action = "sell"
+                    forced_exit_reason = "stop_loss"
+                # trailing stop from peak while in position
+                if not hasattr(self, "_trail_peak_price"):
+                    self._trail_peak_price = price_now
+                self._trail_peak_price = max(float(self._trail_peak_price), price_now)
+                trail_from_peak = (price_now / max(float(self._trail_peak_price), 1e-9)) - 1.0
+                if trail_from_peak <= -float(getattr(config, "TRAILING_STOP_PCT", 0.0)):
+                    forced_action = "sell"
+                    forced_exit_reason = "trailing_stop"
+        else:
+            # Reset peak tracker when flat
+            if hasattr(self, "_trail_peak_price"):
+                self._trail_peak_price = price_now
+
         features = build_features(row, self.portfolio)
 
         # ------------------------------------------------------------------
@@ -588,12 +628,19 @@ class Trainer:
 
         # (moved earlier) stuck adaptation + regime edge adjustment are computed before action masking
 
-        action, sampled_scores, means = self.agent.act_with_scores(
-            features,
-            allowed=allowed_actions,
-            step=self.steps,
-            posterior_scale_override=posterior_scale_effective,
-        )
+        if forced_action is not None:
+            # Policy override: log as a forced exit; the agent still learns from the executed action.
+            action = forced_action
+            sampled_scores = np.zeros(len(ACTIONS), dtype=float)
+            means = np.zeros(len(ACTIONS), dtype=float)
+            forced_exit = True
+        else:
+            action, sampled_scores, means = self.agent.act_with_scores(
+                features,
+                allowed=allowed_actions,
+                step=self.steps,
+                posterior_scale_override=posterior_scale_effective,
+            )
 
         # --- cost-aware + cooldown-aware action masking (prevents spam) --------
         # Goal: keep *proposed* actions aligned with what can actually execute, so the
@@ -1221,6 +1268,10 @@ class Trainer:
                 self.buy_legs += 1
             elif action == "sell":
                 self.sell_legs += 1
+                if forced_exit:
+                    self.forced_exit_count += 1
+                    if forced_exit_reason:
+                        self._forced_exit_reason_counter[forced_exit_reason] += 1
                 # per-leg PnL: use entry price BEFORE the sell (especially important on full closes)
                 # We stash it during execution in entry_price_for_leg.
                 entry_price_for_leg = locals().get("entry_price_for_leg", self.portfolio.entry_price)
