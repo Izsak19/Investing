@@ -136,20 +136,23 @@ def run_loop(
         return []
 
     episode_len = row_count - 1
+    # When the requested step count exceeds the available candle window, cycle the
+    # window rather than silently truncating. This is useful for "learning cycles"
+    # where you want a fixed number of trades/updates.
+    cycle_window = duration is not None or steps > episode_len
     if duration is None and steps > episode_len:
-        print("Warning: requested steps exceed available window; reducing to available window.")
+        print("Info: requested steps exceed available window; cycling window to reach requested steps.")
 
     first_price = float(frame.iloc[0]["close"])
     pv_prev_after = trainer.portfolio.value(first_price)
-    effective_steps = min(steps, episode_len)
 
     while True:
-        if duration is None and idx >= effective_steps:
+        if duration is None and idx >= steps:
             break
         if duration is not None and time.monotonic() - start >= duration:
             break
 
-        i = idx % episode_len if duration is not None else idx
+        i = idx % episode_len if cycle_window else idx
         row = frame.iloc[i]
         next_row = frame.iloc[i + 1]
 

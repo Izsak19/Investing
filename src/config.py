@@ -31,15 +31,65 @@ GATE_SAFETY_MARGIN = 0.0002
 
 # Multiplier to convert estimated cost fraction into an edge threshold.
 # Increase if you still see churn; decrease if you see "stuck in hold".
-COST_EDGE_MULT = 3.0
+# NOTE: Keep this modest. Too high makes the system freeze in HOLD because the
+# model's edge signal is bounded in tanh-space while costs are small fractions.
+# Multiplier applied to the estimated all-in cost when translating it into an edge gate.
+# Keep close to 1.0 on 1m. Larger values can easily cause a HOLD-freeze because the
+# edge margin is bounded in tanh-space and rarely clears an overly conservative gate.
+COST_EDGE_MULT = 1.0
 
 # Throttles (1m is extremely fee-sensitive).
-# These values are deliberately conservative to reduce churn.
-MIN_TRADE_GAP_STEPS = 60
-MIN_HOLD_STEPS = 180
+# These values should reduce churn without creating a "HOLD freeze".
+# On 1m, a ~15m min gap + ~45m min-hold is a good starting point;
+# adaptive cooldown + turnover budgets provide the safety rails against overtrading.
+MIN_TRADE_GAP_STEPS = 8
+MIN_HOLD_STEPS = 20
+
+# Adaptive/conditional cooldown (regime + turnover aware).
+# This avoids both pathologies: "always HOLD" and "fee death by churn".
+ENABLE_ADAPTIVE_COOLDOWN = True
+# Column name for volatility/regime percentile used by adaptive cooldown.
+# Falls back safely if the regime feature is not present.
+COOLDOWN_VOL_COL = globals().get('REGIME_EDGE_VOL_COL', 'regime_edge_vol_pct')  # expected in [0,1]
+# Wider neutral zone: don't over-tighten unless we're *clearly* in low-vol chop.
+COOLDOWN_VOL_LOW_PCT = 0.20
+COOLDOWN_VOL_HIGH_PCT = 0.80
+COOLDOWN_GAP_TIGHTEN_MULT = 1.0   # low vol/chop -> do NOT lengthen beyond base (avoid HOLD-freeze)
+COOLDOWN_GAP_RELAX_MULT = 0.25    # high vol/trend -> much shorter gap (turnover hard-block prevents churn)
+COOLDOWN_HOLD_TIGHTEN_MULT = 1.0
+COOLDOWN_HOLD_RELAX_MULT = 0.50   # allow faster exits/rotation in active regimes
+
+# Floors ensure there is never a full "bypass" loophole.
+COOLDOWN_MIN_GAP_FLOOR = 2
+COOLDOWN_MIN_HOLD_FLOOR = 5
+
+# Turnover-aware scaling: if recent turnover exceeds budget, cooldowns lengthen.
+COOLDOWN_TURNOVER_SENSITIVITY = 0.50  # 0 disables extra scaling
+
+# If the vol column is missing or not a true [0,1] percentile, derive a proxy from returns.
+ADAPTIVE_COOLDOWN_RET_EMA_DECAY = 0.05
+
+# Allow exceptional trades during cooldown when the signal is unusually strong.
+# IMPORTANT: this must be conservative; otherwise it becomes a churn bypass.
+# We also only allow cooldown bypass for risk-reducing actions by default.
+# Allow exceptional trades during cooldown when the signal is unusually strong.
+# If this is too high, you get pathological "timing_blocks" → apparent HOLD-freeze.
+COOLDOWN_STRONG_EDGE_MULT = 3.0      # edge >= this * current cost gate can bypass cooldown
+COOLDOWN_BYPASS_SELL_ONLY = False    # allow BUY as well when edge is strong (still gated by costs/budgets)
+# Even when bypassing, enforce at least this many steps since last trade.
+# IMPORTANT: this should never exceed the *minimum possible* effective gap, otherwise the
+# bypass path becomes impossible and you can get stuck in HOLD for long stretches.
+COOLDOWN_STRONG_MIN_GAP_STEPS = 2
+
+# Turnover hard block: if recent notional traded exceeds this multiple of the budget,
+# block new entries (and only allow exits with a strong edge).
+TURNOVER_HARD_BLOCK_MULT = 1.5
+
+# Close tiny residual positions instead of bleeding out via hundreds of partial sells.
+DUST_POSITION_NOTIONAL = 5.0         # if remaining position value < this, sell the rest
 
 # Start gating early (otherwise you churn during warmup)
-WARMUP_TRADES_BEFORE_GATING = 20
+WARMUP_TRADES_BEFORE_GATING = 5  # lowered from 20 to reduce early ungated churn on 1m
 
 # ---- Bandit / RL knobs -------------------------------------------------------
 
@@ -111,6 +161,10 @@ PROB_SHAPING_MAX_COUNT = 50_000
 # Numeric safety
 FEATURE_CLIP = 10.0
 WEIGHT_CLIP = 10.0
+# How aggressively we normalize action-score margins before tanh().
+# If too large -> margins collapse -> cost gate blocks everything -> HOLD-heavy.
+# If too small -> margins saturate -> churn risk.
+MARGIN_SCALE_MULT = 1.0
 ERROR_CLIP = 5.0
 
 # ---- Execution policy knobs --------------------------------------------------
@@ -120,7 +174,7 @@ ENABLE_STUCK_UNFREEZE = True
 STUCK_HOLD_WINDOW = 800           # lookback actions used to decide if we're stuck
 STUCK_HOLD_RATIO = 0.9            # trigger when holds dominate this share of recent actions
 STUCK_POSTERIOR_BOOST = 0.35      # additive boost to exploration scale when stuck
-STUCK_EDGE_THRESHOLD = 0.00005    # relaxed edge gate used while stuck
+STUCK_EDGE_THRESHOLD = 0.0        # relaxed edge gate used while stuck (0 = only cost gate applies)
 
 # Position sizing (dynamic)
 POSITION_FRACTION_MIN = 0.03     # min fraction when taking a trade
@@ -150,13 +204,16 @@ REGIME_EDGE_RELAX_MULT = 0.7     # multiplier when vol percentile is high (trend
 
 # Action hysteresis (reduce flip-flopping between BUY/SELL)
 ENABLE_ACTION_HYSTERESIS = True
-HYSTERESIS_REQUIRED_STREAK = 3    # require this many consecutive proposals before a flip
+HYSTERESIS_REQUIRED_STREAK = 2    # require this many consecutive proposals before a flip
 HYSTERESIS_ALLOW_IF_EDGE_MULT = 2.0  # allow immediate flip if edge >= this * current gate threshold
 
 # Multi-timeframe confirmation (lightweight 5m regime filter)
 ENABLE_MTF_CONFIRMATION = True
-MTF_VOL_PCT_MIN = 0.55          # require volatility percentile >= this for entries/exits
-MTF_SPREAD_PCT_MAX = 0.85       # block trades when spread percentile is too high
+# NOTE: In practice, a hard low-vol "block" can cause HOLD-freeze when most bars sit below the cutoff.
+# We therefore treat low-vol as a *tighter edge requirement* for entries, not an outright veto.
+MTF_VOL_PCT_MIN = 0.30          # below this we tighten entry requirements (not a hard block by itself)
+MTF_LOWVOL_EDGE_MULT = 1.5      # when vol_pct < MTF_VOL_PCT_MIN, require edge >= this * cost gate to enter
+MTF_SPREAD_PCT_MAX = 0.85       # block entries when spread percentile is too high
 
 # Reporting
 ACTION_HISTORY_WINDOW = 5_000
