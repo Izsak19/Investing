@@ -286,6 +286,13 @@ REGIME_EDGE_TIGHTEN_MULT = 1.6
 REGIME_EDGE_RELAX_MULT = 0.6
 
 # Action hysteresis
+
+# Confidence-based HOLD gating (agent-side).
+
+# This is separate from EDGE_THRESHOLD (used in cost gating).
+
+# If set too high, it can force a permanent HOLD regime as exploration decays.
+CONFIDENCE_HOLD_THRESHOLD = 0.0000
 ENABLE_ACTION_HYSTERESIS = True
 HYSTERESIS_REQUIRED_STREAK = 1
 HYSTERESIS_ALLOW_IF_EDGE_MULT = 1.5
@@ -362,51 +369,143 @@ PROFILES = {
         "MIN_TRADE_GAP_STEPS": 0,
         "ENABLE_PROB_SHAPING": False,
     },
-    # 5m-specific: prioritize abstention, require stronger edge than costs, reduce churn.
-    # Steps are 5-minute candles: MIN_HOLD_STEPS=18 => 90 minutes; MIN_TRADE_GAP_STEPS=9 => 45 minutes.
+    # 5m-specific: conservative but not frozen.
+    # Steps are 5-minute candles (so MIN_HOLD_STEPS=6 => 30 minutes).
     "tf_5m_conservative": {
-        # Always gate from the start on 5m (avoid churny "warmup" loophole).
-        "WARMUP_TRADES_BEFORE_GATING": 0,
-        # Exploration down (stop constant "probe buys").
-        "POSTERIOR_SCALE": 0.06,
-        "POSTERIOR_DECAY_HALF_LIFE_STEPS": 6_000,
-        "POSTERIOR_SCALE_MIN": 0.008,
-        "FORGETTING_FACTOR": 0.997,
-        # Trade only when edge clearly exceeds friction.
-        # Rationale: the avgW/avgL/expectancy block indicates the policy is taking
-        # marginal setups. Tighten the bar so we sample fewer but higher-conviction trades.
-        "EDGE_THRESHOLD": 0.0075,
-        "COST_EDGE_MULT": 3.8,
-        "EDGE_SAFETY_MARGIN": 0.00075,
-        # Trade less and reduce flip-flopping.
-        "MIN_HOLD_STEPS": 24,
-        "MIN_TRADE_GAP_STEPS": 12,
+        # Key fix vs the prior version: the old (EDGE_THRESHOLD=0.0075, COST_EDGE_MULT=3.8)
+        # pre-masked almost every BUY/SELL into HOLD, starving learning.
+        "WARMUP_TRADES_BEFORE_GATING": 20,
+        # Confidence gating: disable for 5m profiles; cost-aware gating already controls churn.
+        "CONFIDENCE_HOLD_THRESHOLD": 0.0,
+        # Exploration: enough to collect informative samples early, then decay.
+        "POSTERIOR_SCALE": 0.16,
+        "POSTERIOR_DECAY_HALF_LIFE_STEPS": 8_000,
+        "POSTERIOR_SCALE_MIN": 0.03,
+        "FORGETTING_FACTOR": 0.996,
+        # Cost-aware edge requirements (moderate).
+        "EDGE_THRESHOLD": 0.0022,
+        "COST_EDGE_MULT": 1.6,
+        "EDGE_SAFETY_MARGIN": 0.00025,
+        # Timing / churn controls (5m steps).
+        "MIN_HOLD_STEPS": 6,
+        "MIN_TRADE_GAP_STEPS": 4,
         "HYSTERESIS_REQUIRED_STREAK": 2,
-        "HYSTERESIS_ALLOW_IF_EDGE_MULT": 1.8,
-        "TRADE_RATE_WINDOW_STEPS": 288,
-        "MAX_TRADES_PER_WINDOW": 6,
-        "TRADE_RATE_SELL_BYPASS_EDGE_MULT": 2.5,
-        # Turnover discipline.
-        "TURNOVER_PENALTY": 0.00030,
-        "TURNOVER_BUDGET_MULTIPLIER": 1.5,
-        # IMPORTANT: allow the 5m profile to actually take effect (1m defaults clamp too high).
+        "HYSTERESIS_ALLOW_IF_EDGE_MULT": 1.6,
+        # Trade-rate ceiling: allow learning, still cap churn.
+        # Window=240 steps ~= 20 hours; 30 trades ~= 1.5 trades/hour max.
+        "TRADE_RATE_WINDOW_STEPS": 240,
+        "MAX_TRADES_PER_WINDOW": 30,
+        "TRADE_RATE_SELL_BYPASS_EDGE_MULT": 2.0,
+        # Turnover discipline (learning regularizer + budget).
+        "TURNOVER_PENALTY": 0.00006,
+        "TURNOVER_BUDGET_MULTIPLIER": 2.0,
         "TURNOVER_BUDGET_MIN": 1.0,
-        "TURNOVER_BUDGET_PENALTY": 0.60,
-        # IMPORTANT: stuck-unfreeze is useful on 1m, but on 5m it can bypass throttles and re-enable churn.
-        "ENABLE_STUCK_UNFREEZE": False,
-        # Loss containment: reduce avgL magnitude and prevent long, drifting holds.
-        # This is a risk overlay (not gating) evaluated before the policy action.
+        "TURNOVER_BUDGET_PENALTY": 0.26,
+        # Safety net against HOLD starvation.
+        "ENABLE_STUCK_UNFREEZE": True,
+        # Risk exits: tail-risk limiter to prevent long drifts while learning on sparse signals.
         "ENABLE_HARD_RISK_EXITS": True,
-        "STOP_LOSS_PCT": 0.012,
+        "STOP_LOSS_PCT": 0.008,
         "TRAILING_STOP_PCT": 0.010,
-        "MAX_POSITION_HOLD_STEPS": 288,
-        # Slightly lower reward scale to avoid saturating updates on sparse trades.
-        # Keep adaptive reward scaling enabled, but make it *slow* for 5m so the profile's
-        # base scale remains the anchor and we don't thrash scale during short runs.
+        "MAX_POSITION_HOLD_STEPS": 72,
+        # Make trades meaningful on 5m (avoid tiny, fee-dominated probe orders).
+        "POSITION_FRACTION_MIN": 0.03,
+        "POSITION_FRACTION_MAX": 0.12,
+        # Learning stability
+        "REWARD_SCALE": 65.0,
+        "ADAPTIVE_REWARD_DECAY": 0.08,
+        "DRAWDOWN_PENALTY": 0.55,
+        "DIRECTIONAL_SHAPING_WEIGHT": 0.05,
+        "FLAT_HOLD_MISS_PENALTY_WEIGHT": 0.03,
+        "ENABLE_PROB_SHAPING": False,
+    },
+
+    # 5m learning-first preset: trade enough to learn signal, then let the gates do their job.
+    # Use this when the agent is HOLD-starving or in early development.
+    "tf_5m_learn": {
+        "WARMUP_TRADES_BEFORE_GATING": 50,
+        "CONFIDENCE_HOLD_THRESHOLD": 0.0,
+        "POSTERIOR_SCALE": 0.22,
+        "POSTERIOR_DECAY_HALF_LIFE_STEPS": 10_000,
+        "POSTERIOR_SCALE_MIN": 0.05,
+        "FORGETTING_FACTOR": 0.995,
+        "EDGE_THRESHOLD": 0.0014,
+        "COST_EDGE_MULT": 1.3,
+        "EDGE_SAFETY_MARGIN": 0.00020,
+        "MIN_HOLD_STEPS": 3,
+        "MIN_TRADE_GAP_STEPS": 2,
+        "HYSTERESIS_REQUIRED_STREAK": 1,
+        "HYSTERESIS_ALLOW_IF_EDGE_MULT": 1.4,
+        "TRADE_RATE_WINDOW_STEPS": 240,
+        "MAX_TRADES_PER_WINDOW": 60,
+        "TRADE_RATE_SELL_BYPASS_EDGE_MULT": 1.7,
+        "TURNOVER_PENALTY": 0.00005,
+        "TURNOVER_BUDGET_MULTIPLIER": 3.0,
+        "TURNOVER_BUDGET_MIN": 1.0,
+        "TURNOVER_BUDGET_PENALTY": 0.22,
+        "ENABLE_STUCK_UNFREEZE": True,
+        "ENABLE_HARD_RISK_EXITS": True,
+        "STOP_LOSS_PCT": 0.010,
+        "TRAILING_STOP_PCT": 0.012,
+        "MAX_POSITION_HOLD_STEPS": 60,
+        "POSITION_FRACTION_MIN": 0.03,
+        "POSITION_FRACTION_MAX": 0.15,
+        "REWARD_SCALE": 70.0,
+        "ADAPTIVE_REWARD_DECAY": 0.10,
+        "DRAWDOWN_PENALTY": 0.55,
+        "DIRECTIONAL_SHAPING_WEIGHT": 0.06,
+        "FLAT_HOLD_MISS_PENALTY_WEIGHT": 0.03,
+        "ENABLE_PROB_SHAPING": False,
+        "ENABLE_MTF_CONFIRMATION": False,
+    },
+
+    # 5m profitability-focused preset: trade less, cut losses early, and only
+    # participate when edge clearly exceeds full friction. This is intended as
+    # a safer default for live experiments; it prioritizes avoiding negative
+    # expectancy churn over frequent trading.
+    "tf_5m_profit_focus": {
+        "WARMUP_TRADES_BEFORE_GATING": 0,
+        # Exploration down: avoid constant probe trades when we don't have edge.
+        "POSTERIOR_SCALE": 0.04,
+        "POSTERIOR_DECAY_HALF_LIFE_STEPS": 8_000,
+        "POSTERIOR_SCALE_MIN": 0.006,
+        "FORGETTING_FACTOR": 0.997,
+
+        # Require strong edge after all-in costs (fee + slippage + safety margin).
+        "EDGE_THRESHOLD": 0.0100,
+        "COST_EDGE_MULT": 4.2,
+        "EDGE_SAFETY_MARGIN": 0.00100,
+        "GATE_SAFETY_MARGIN": 0.00015,
+
+        # Reduce flip-flopping / churn.
+        "MIN_HOLD_STEPS": 30,
+        "MIN_TRADE_GAP_STEPS": 15,
+        "HYSTERESIS_REQUIRED_STREAK": 2,
+        "HYSTERESIS_ALLOW_IF_EDGE_MULT": 2.0,
+        "TRADE_RATE_WINDOW_STEPS": 120,
+        "MAX_TRADES_PER_WINDOW": 10,
+        "TRADE_RATE_SELL_BYPASS_EDGE_MULT": 2.8,
+
+        # Turnover discipline and adaptive budget floors suitable for 5m.
+        "TURNOVER_PENALTY": 0.00010,
+        "TURNOVER_BUDGET_MULTIPLIER": 1.3,
+        "TURNOVER_BUDGET_MIN": 1.0,
+        "TURNOVER_BUDGET_PENALTY": 0.30,
+
+        # Prefer clean exits while we are still validating the edge.
+        "PARTIAL_SELLS": False,
+
+        # Loss containment overlay (mandatory for profitability attempts).
+        "ENABLE_HARD_RISK_EXITS": True,
+        "STOP_LOSS_PCT": 0.010,
+        "TRAILING_STOP_PCT": 0.012,
+        "MAX_POSITION_HOLD_STEPS": 84,
+
+        # Reward shaping: keep learning stable on sparse, higher-quality trades.
         "REWARD_SCALE": 55.0,
         "ADAPTIVE_REWARD_DECAY": 0.05,
-        "DRAWDOWN_PENALTY": 0.75,
-        "DIRECTIONAL_SHAPING_WEIGHT": 0.08,
+        "DRAWDOWN_PENALTY": 0.60,
+        "DIRECTIONAL_SHAPING_WEIGHT": 0.04,
         "FLAT_HOLD_MISS_PENALTY_WEIGHT": 0.03,
         "ENABLE_PROB_SHAPING": False,
     },

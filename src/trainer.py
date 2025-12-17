@@ -710,9 +710,15 @@ class Trainer:
                 # Pre-mask veto: the action never becomes proposed_action, so without
                 # this counter it would be invisible in gate_blocks/gate_reason_counts.
                 self._premask_gate_reason_counter["cost_gate_buy"] += 1
-            if "sell" in feasible and sell_margin < cost_edge:
-                feasible.remove("sell")
-                self._premask_gate_reason_counter["cost_gate_sell"] += 1
+            # SELL: do not pre-mask exits on cost edge. Exits are *risk reducing* and the agent
+            # must always have the option to close exposure; otherwise the system can HOLD-freeze
+            # in-position for thousands of steps when margins are small.
+            # We still account for real execution frictions in PnL and learning reward.
+            if "sell" in feasible and self.portfolio.position <= 0:
+                # (defensive) Only apply sell cost gating when flat (should be rare).
+                if sell_margin < cost_edge:
+                    feasible.remove("sell")
+                    self._premask_gate_reason_counter["cost_gate_sell"] += 1
 
             # 2) Cooldown feasibility for SELL: if we are inside the trade-gap cooldown,
             # only allow SELL proposals when they qualify for the strong-exit bypass.
@@ -765,12 +771,11 @@ class Trainer:
                 gate_blocked = True
                 self.gate_blocks += 1
                 self._gate_reason_counter["cost_gate"] += 1
-            elif action == "sell" and sell_margin < cost_edge:
-                action = "hold"
-                hold_reason = "cost_gate"
-                gate_blocked = True
-                self.gate_blocks += 1
-                self._gate_reason_counter["cost_gate"] += 1
+            elif action == "sell":
+                # Do not cost-gate exits. SELL reduces exposure and is required for recovery from
+                # bad entries; cost-gating SELL creates permanent HOLD regimes in live 5m runs.
+                # Execution frictions are still applied in portfolio PnL and learning reward.
+                pass
 
         # --- adaptive cooldown (regime + turnover aware) ----------------------
         # NOTE: eff_gap/eff_hold and gap_ok/hold_ok are computed earlier (before act())
@@ -910,19 +915,13 @@ class Trainer:
         turnover_budget = self.initial_cash * self.turnover_budget_multiplier
         turnover_now = float(sum(self._turnover_window))
         turnover_stressed = turnover_now > (turnover_budget * float(getattr(config, 'TURNOVER_HARD_BLOCK_MULT', 1.0)))
-        if (not warmup_active) and turnover_stressed and action in ("buy", "sell"):
-            if action == "buy":
-                action = "hold"
-                hold_reason = hold_reason or "turnover_budget"
-                budget_blocked = True
-                self.budget_blocks += 1
-            elif action == "sell":
-                # only allow sell-through when the edge is meaningfully above costs
-                if sell_margin < (2.0 * cost_edge):
-                    action = "hold"
-                    hold_reason = hold_reason or "turnover_budget"
-                    budget_blocked = True
-                    self.budget_blocks += 1
+        # Turnover budget is meant to stop *new exposure* (BUY) when the strategy is
+        # churning fees. It must NOT block exits; otherwise you get permanent HOLD regimes.
+        if (not warmup_active) and turnover_stressed and action == "buy":
+            action = "hold"
+            hold_reason = hold_reason or "turnover_budget"
+            budget_blocked = True
+            self.budget_blocks += 1
 
         # --- trade-rate throttling (anti-churn) -------------------------------
         # Count executed trade *legs* over a rolling step window and stop opening
@@ -930,21 +929,15 @@ class Trainer:
         # cooldowns prevent immediate flip-flops; this prevents slow fee bleed.
         tr_window = int(getattr(config, 'TRADE_RATE_WINDOW_STEPS', 0) or 0)
         tr_max = int(getattr(config, 'MAX_TRADES_PER_WINDOW', 0) or 0)
-        if (not warmup_active) and (not stuck_relax) and tr_window > 0 and tr_max > 0 and action in ("buy", "sell"):
+        # Trade-rate throttling prevents churn on entries. It must NOT block exits; otherwise
+        # long runs can freeze into HOLD forever after hitting the trade limit once.
+        if (not warmup_active) and (not stuck_relax) and tr_window > 0 and tr_max > 0 and action == "buy":
             recent_trades = int(sum(getattr(self, '_trade_count_window', [])))
             if recent_trades >= tr_max:
-                if action == "buy":
-                    action = "hold"
-                    hold_reason = hold_reason or "trade_rate"
-                    budget_blocked = True
-                    self.budget_blocks += 1
-                elif action == "sell":
-                    mult = float(getattr(config, 'TRADE_RATE_SELL_BYPASS_EDGE_MULT', 3.0))
-                    if sell_margin < (mult * cost_edge):
-                        action = "hold"
-                        hold_reason = hold_reason or "trade_rate"
-                        budget_blocked = True
-                        self.budget_blocks += 1
+                action = "hold"
+                hold_reason = hold_reason or "trade_rate"
+                budget_blocked = True
+                self.budget_blocks += 1
 
         trade_executed = False
         fee_paid = 0.0

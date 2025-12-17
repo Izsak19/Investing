@@ -318,7 +318,9 @@ def main() -> None:
     except Exception:
         tf_min = None
     if args.profile is None and tf_min is not None and tf_min >= 5:
-        config.apply_profile('tf_5m_conservative')
+        # 5m+: default to a profitability-focused preset to avoid churn and to
+        # enforce hard risk exits by default.
+        config.apply_profile('tf_5m_profit_focus')
     eval_mode = args.eval
     if eval_mode and args.continuous:
         print("--eval disables --continuous; running a bounded evaluation pass instead.")
