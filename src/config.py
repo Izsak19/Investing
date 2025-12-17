@@ -53,7 +53,9 @@ TURNOVER_PENALTY = 0.00005
 # This throttle adds a soft-but-firm ceiling on trade frequency, while still
 # allowing risk-reducing exits.
 TRADE_RATE_WINDOW_STEPS = 1000          # ~16.7h on 1m (large enough to smooth)
-MAX_TRADES_PER_WINDOW = 180             # allow more learning trades; still prevents runaway churn
+# Tighten this to actually bind: recent runs are ~165 trades / 1000 steps.
+# Setting <165 forces a real reduction in churn on 1m while still allowing exits.
+MAX_TRADES_PER_WINDOW = 90              # target <= ~90 trades / 1000 steps
 # When trade rate is exceeded:
 # - block BUYs entirely
 # - allow SELLs only when the sell edge is strong (margin >= multiplier * cost_edge)
@@ -79,7 +81,7 @@ WARMUP_TRADES_BEFORE_GATING = 5
 # ----------------------------------------------------------------------------
 
 # 1m is extremely fee-sensitive. These are intentionally conservative.
-MIN_TRADE_GAP_STEPS = 5      # allow more trading while learning
+MIN_TRADE_GAP_STEPS = 10     # reduce churn: >=10 minutes between entries/exits on 1m
 MIN_HOLD_STEPS = 30          # allow exits/adjustments sooner
 
 # Adaptive/conditional cooldown (regime + turnover aware).
