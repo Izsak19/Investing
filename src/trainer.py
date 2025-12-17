@@ -74,6 +74,11 @@ class TrainerState:
     buy_legs: int = 0
     sell_legs: int = 0
     winning_sell_legs: int = 0
+    # Per-sell-leg net PnL diagnostics (used for avg win/loss and expectancy)
+    win_pnl_sum: float = 0.0
+    loss_pnl_sum: float = 0.0
+    win_pnl_count: int = 0
+    loss_pnl_count: int = 0
     # legacy fields kept for backwards compatibility (older dashboards/state)
     total_trades: int = 0
     successful_trades: int = 0
@@ -163,6 +168,11 @@ class Trainer:
         self.buy_legs = 0
         self.sell_legs = 0
         self.winning_sell_legs = 0
+        # PnL diagnostics (per SELL leg, net of frictions)
+        self._win_pnl_sum: float = 0.0
+        self._loss_pnl_sum: float = 0.0
+        self._win_pnl_count: int = 0
+        self._loss_pnl_count: int = 0
         # legacy counters (kept for compatibility)
         self.steps = 0
         self.sell_trades = 0
@@ -251,6 +261,10 @@ class Trainer:
         self.buy_legs = 0
         self.sell_legs = 0
         self.winning_sell_legs = 0
+        self._win_pnl_sum = 0.0
+        self._loss_pnl_sum = 0.0
+        self._win_pnl_count = 0
+        self._loss_pnl_count = 0
         self.sell_trades = 0
         self.winning_sells = 0
         self.gate_blocks = 0
@@ -413,6 +427,28 @@ class Trainer:
         if getattr(self, 'sell_legs', 0) > 0:
             return float(getattr(self, 'winning_sell_legs', 0)) / max(1, int(getattr(self, 'sell_legs', 0)))
         return self.winning_sells / max(1, self.sell_trades)
+
+    @property
+    def avg_win_pnl(self) -> float:
+        return 0.0 if self._win_pnl_count <= 0 else (self._win_pnl_sum / self._win_pnl_count)
+
+    @property
+    def avg_loss_pnl(self) -> float:
+        # negative value (average losing SELL-leg PnL)
+        return 0.0 if self._loss_pnl_count <= 0 else (self._loss_pnl_sum / self._loss_pnl_count)
+
+    @property
+    def win_loss_ratio(self) -> float:
+        aw = self.avg_win_pnl
+        al = self.avg_loss_pnl
+        denom = abs(al) if al != 0 else 0.0
+        return 0.0 if denom <= 0 else (aw / denom)
+
+    @property
+    def expectancy_pnl_per_sell_leg(self) -> float:
+        total_legs = self._win_pnl_count + self._loss_pnl_count
+        total = self._win_pnl_sum + self._loss_pnl_sum
+        return 0.0 if total_legs <= 0 else (total / total_legs)
 
     @property
     def action_distribution(self) -> dict[str, float]:
@@ -1285,9 +1321,15 @@ class Trainer:
                 # We stash it during execution in entry_price_for_leg.
                 entry_price_for_leg = locals().get("entry_price_for_leg", self.portfolio.entry_price)
                 leg_qty = notional_traded / max(price_now, 1e-9)
-                leg_pnl = (price_now - entry_price_for_leg) * leg_qty
-                if leg_pnl > 0:
+                # entry_price_for_leg includes buy-side frictions via basis; subtract sell frictions for net leg PnL
+                leg_pnl_net = (price_now - entry_price_for_leg) * leg_qty - fee_paid - slippage_paid
+                if leg_pnl_net > 0:
                     self.winning_sell_legs += 1
+                    self._win_pnl_sum += float(leg_pnl_net)
+                    self._win_pnl_count += 1
+                elif leg_pnl_net < 0:
+                    self._loss_pnl_sum += float(leg_pnl_net)
+                    self._loss_pnl_count += 1
 
         # legacy full-close sell win rate (kept for backward compatibility)
         if action == "sell" and trade_executed:
@@ -1374,6 +1416,10 @@ class Trainer:
             "buy_legs": int(getattr(self, 'buy_legs', 0)),
             "sell_legs": int(getattr(self, 'sell_legs', 0)),
             "winning_sell_legs": int(getattr(self, 'winning_sell_legs', 0)),
+            "avg_win_pnl": float(getattr(self, 'avg_win_pnl', 0.0)),
+            "avg_loss_pnl": float(getattr(self, 'avg_loss_pnl', 0.0)),
+            "win_loss_ratio": float(getattr(self, 'win_loss_ratio', 0.0)),
+            "expectancy_pnl_per_sell_leg": float(getattr(self, 'expectancy_pnl_per_sell_leg', 0.0)),
             "avg_notional_per_trade": (float(getattr(self, 'total_notional_traded', 0.0)) / max(1, int(getattr(self, 'executed_trade_count', 0)))) if int(getattr(self, 'executed_trade_count', 0)) > 0 else 0.0,
             "turnover_per_1000_steps": (sum(self._turnover_window) / max(1, self.total_steps)) * 1000.0,
             # legacy field name kept (now uses executed_trade_count by default)
@@ -1423,6 +1469,10 @@ class Trainer:
             buy_legs=int(getattr(self, 'buy_legs', 0)),
             sell_legs=int(getattr(self, 'sell_legs', 0)),
             winning_sell_legs=int(getattr(self, 'winning_sell_legs', 0)),
+            win_pnl_sum=float(getattr(self, '_win_pnl_sum', 0.0)),
+            loss_pnl_sum=float(getattr(self, '_loss_pnl_sum', 0.0)),
+            win_pnl_count=int(getattr(self, '_win_pnl_count', 0)),
+            loss_pnl_count=int(getattr(self, '_loss_pnl_count', 0)),
             # legacy fields
             total_trades=len(self.history),
             successful_trades=self.winning_sells,
@@ -1580,6 +1630,10 @@ def resume_from(run_dir: Path, agent: BanditAgent, trainer: Trainer) -> None:
         trainer.buy_legs = int(getattr(state, 'buy_legs', 0))
         trainer.sell_legs = int(getattr(state, 'sell_legs', 0))
         trainer.winning_sell_legs = int(getattr(state, 'winning_sell_legs', 0))
+        trainer._win_pnl_sum = float(getattr(state, 'win_pnl_sum', 0.0))
+        trainer._loss_pnl_sum = float(getattr(state, 'loss_pnl_sum', 0.0))
+        trainer._win_pnl_count = int(getattr(state, 'win_pnl_count', 0))
+        trainer._loss_pnl_count = int(getattr(state, 'loss_pnl_count', 0))
         trainer.sell_trades = state.sell_trades
         trainer.winning_sells = state.winning_sells
         trainer.last_trade_step = state.last_trade_step

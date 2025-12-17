@@ -32,6 +32,10 @@ def build_table(
     gate_blocks: int,
     timing_blocks: int,
     budget_blocks: int,
+    avg_win_pnl: float,
+    avg_loss_pnl: float,
+    win_loss_ratio: float,
+    expectancy_pnl_per_sell_leg: float,
 ) -> Table:
     """Render a compact dashboard (<= 10 rows).
 
@@ -83,6 +87,12 @@ def build_table(
     )
     table.add_row("Perf", perf)
 
+    # 9b) Realized trade PnL diagnostics (per SELL leg, net of fees/slippage)
+    table.add_row(
+        "Trade PnL",
+        f"avgW {avg_win_pnl:+.2f} | avgL {avg_loss_pnl:+.2f} | W/L {win_loss_ratio:.2f} | exp {expectancy_pnl_per_sell_leg:+.2f}",
+    )
+
     # 10) Guardrail diagnostics (why actions were blocked)
     table.add_row("Blocks", f"gate {gate_blocks} | timing {timing_blocks} | budget {budget_blocks}")
 
@@ -110,6 +120,10 @@ def live_dashboard(
             int,
             int,
             int,
+            float,
+            float,
+            float,
+            float,
         ]
     ]
 ):
@@ -133,6 +147,10 @@ def live_dashboard(
             gate_blocks,
             timing_blocks,
             budget_blocks,
+            avg_win_pnl,
+            avg_loss_pnl,
+            win_loss_ratio,
+            expectancy_pnl_per_sell_leg,
         ) in events:
             live.update(
                 build_table(
@@ -154,5 +172,9 @@ def live_dashboard(
                     gate_blocks,
                     timing_blocks,
                     budget_blocks,
+                    avg_win_pnl,
+                    avg_loss_pnl,
+                    win_loss_ratio,
+                    expectancy_pnl_per_sell_leg,
                 )
             )

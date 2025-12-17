@@ -285,9 +285,47 @@ def main() -> None:
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     run_id = args.run_id or f"auto_{args.symbol.replace('/', '_')}_{args.timeframe}_{timestamp}"
     run_dir = base / run_id; run_dir.mkdir(parents=True, exist_ok=True)
+    # Write a pointer so tools can reference the latest learning cycle without typing the run_id.
+    try:
+        from src.eval.latest import write_latest_run
+        write_latest_run(runs_root=base, run_dir=run_dir, symbol=args.symbol, timeframe=args.timeframe)
+    except Exception as exc:
+        print(f"[latest] could not write LATEST.json: {exc}")
     for cycle in range(1, args.max_cycles + 1):
         try:
-            if run_cycle(args, cycle, run_dir, run_id):
+            ok = run_cycle(args, cycle, run_dir, run_id)
+            # After each learning cycle: write latest pointer + run offline evaluator sweep.
+            try:
+                from src.eval.latest import write_latest_run
+                from src.eval.types import EvalConfig
+                from src.eval.orchestrator import sweep_checkpoints, maybe_promote
+                from src.eval.promotion import PromotionPolicy
+                write_latest_run(runs_root=base, run_dir=run_dir, symbol=args.symbol, timeframe=args.timeframe)
+                ecfg = EvalConfig(
+                    symbol=args.symbol,
+                    timeframe=args.timeframe,
+                    limit=2000,
+                    steps=1500,
+                    offline=args.offline,
+                    cache=args.cache,
+                    cache_only=args.cache_only,
+                )
+                sweep = sweep_checkpoints(run_dir=run_dir, cfg=ecfg, steps=None)
+                # Tail gates: block promotions with ugly left-tail step PnL.
+                # Defaults are conservative; tune per symbol/timeframe.
+                ppolicy = PromotionPolicy(
+                    min_score_delta=0.0,
+                    require_positive_total_return=False,
+                    min_pnl_n=200,
+                    max_p05_loss=1.0,
+                    max_min_loss=5.0,
+                )
+                _, msg = maybe_promote(sweep=sweep, run_dir=run_dir, policy=ppolicy)
+                print(f"[evaluator] {msg}")
+            except Exception:
+                # If evaluator wiring fails, training loop should still proceed.
+                pass
+            if ok:
                 break
         except Exception as exc:
             print(f"Cycle {cycle} failed: {exc}")

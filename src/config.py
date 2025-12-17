@@ -166,6 +166,17 @@ ADAPTIVE_RISK_RANGE = 0.45
 
 DRAWDOWN_PENALTY = 0.6
 
+# ----------------------------------------------------------------------------
+# Safety kill-switch (stop a run when live expectancy is clearly negative)
+# ----------------------------------------------------------------------------
+
+# If enabled, the main loop will stop early when the strategy is structurally losing.
+ENABLE_KILL_SWITCH = True
+KILL_SWITCH_MIN_SELL_LEGS = 200
+KILL_SWITCH_EXPECTANCY_PNL_PER_SELL_LEG = -0.05  # stop if expectancy stays worse than this
+KILL_SWITCH_MAX_DRAWDOWN = 0.12                  # stop earlier when DD is already material
+KILL_SWITCH_MAX_TRADES = 2500                    # absolute guardrail (especially for 5m)
+
 # Turnover budget (rolling): keep tighter for 1m.
 TURNOVER_BUDGET_MULTIPLIER = 6.0
 TURNOVER_BUDGET_MIN = 5.0
@@ -351,12 +362,64 @@ PROFILES = {
         "MIN_TRADE_GAP_STEPS": 0,
         "ENABLE_PROB_SHAPING": False,
     },
+    # 5m-specific: prioritize abstention, require stronger edge than costs, reduce churn.
+    # Steps are 5-minute candles: MIN_HOLD_STEPS=18 => 90 minutes; MIN_TRADE_GAP_STEPS=9 => 45 minutes.
+    "tf_5m_conservative": {
+        # Always gate from the start on 5m (avoid churny "warmup" loophole).
+        "WARMUP_TRADES_BEFORE_GATING": 0,
+        # Exploration down (stop constant "probe buys").
+        "POSTERIOR_SCALE": 0.06,
+        "POSTERIOR_DECAY_HALF_LIFE_STEPS": 6_000,
+        "POSTERIOR_SCALE_MIN": 0.008,
+        "FORGETTING_FACTOR": 0.997,
+        # Trade only when edge clearly exceeds friction.
+        # Rationale: the avgW/avgL/expectancy block indicates the policy is taking
+        # marginal setups. Tighten the bar so we sample fewer but higher-conviction trades.
+        "EDGE_THRESHOLD": 0.0075,
+        "COST_EDGE_MULT": 3.8,
+        "EDGE_SAFETY_MARGIN": 0.00075,
+        # Trade less and reduce flip-flopping.
+        "MIN_HOLD_STEPS": 24,
+        "MIN_TRADE_GAP_STEPS": 12,
+        "HYSTERESIS_REQUIRED_STREAK": 2,
+        "HYSTERESIS_ALLOW_IF_EDGE_MULT": 1.8,
+        "TRADE_RATE_WINDOW_STEPS": 288,
+        "MAX_TRADES_PER_WINDOW": 6,
+        "TRADE_RATE_SELL_BYPASS_EDGE_MULT": 2.5,
+        # Turnover discipline.
+        "TURNOVER_PENALTY": 0.00030,
+        "TURNOVER_BUDGET_MULTIPLIER": 1.5,
+        # IMPORTANT: allow the 5m profile to actually take effect (1m defaults clamp too high).
+        "TURNOVER_BUDGET_MIN": 1.0,
+        "TURNOVER_BUDGET_PENALTY": 0.60,
+        # IMPORTANT: stuck-unfreeze is useful on 1m, but on 5m it can bypass throttles and re-enable churn.
+        "ENABLE_STUCK_UNFREEZE": False,
+        # Loss containment: reduce avgL magnitude and prevent long, drifting holds.
+        # This is a risk overlay (not gating) evaluated before the policy action.
+        "ENABLE_HARD_RISK_EXITS": True,
+        "STOP_LOSS_PCT": 0.012,
+        "TRAILING_STOP_PCT": 0.010,
+        "MAX_POSITION_HOLD_STEPS": 288,
+        # Slightly lower reward scale to avoid saturating updates on sparse trades.
+        # Keep adaptive reward scaling enabled, but make it *slow* for 5m so the profile's
+        # base scale remains the anchor and we don't thrash scale during short runs.
+        "REWARD_SCALE": 55.0,
+        "ADAPTIVE_REWARD_DECAY": 0.05,
+        "DRAWDOWN_PENALTY": 0.75,
+        "DIRECTIONAL_SHAPING_WEIGHT": 0.08,
+        "FLAT_HOLD_MISS_PENALTY_WEIGHT": 0.03,
+        "ENABLE_PROB_SHAPING": False,
+    },
 }
 
+# Track the last applied profile so runs can record configuration provenance.
+ACTIVE_PROFILE: str | None = None
 
 def apply_profile(name: str | None) -> None:
     if not name:
         return
+    # Record provenance for metrics/debugging.
+    globals()["ACTIVE_PROFILE"] = name
     profile = PROFILES.get(name)
     if not profile:
         return

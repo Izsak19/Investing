@@ -60,7 +60,8 @@ class DataFeed:
         data_path, meta_path = self._cache_paths(window_end)
         if not data_path.exists():
             return None
-        frame = pd.read_csv(data_path, parse_dates=["timestamp"], infer_datetime_format=True)
+        # pandas: infer_datetime_format is deprecated; strict parsing is default now.
+        frame = pd.read_csv(data_path, parse_dates=["timestamp"])
         is_live = False
         if meta_path.exists():
             try:
