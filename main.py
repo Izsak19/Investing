@@ -63,7 +63,7 @@ def parse_args() -> argparse.Namespace:
         "--warmup-hours",
         type=float,
         default=0.0,
-        help="Optional preflight duration (hours) on the last 24h window before switching to live streaming.",
+        help="Optional preflight duration (hours) on a lookback window before switching to live streaming. The lookback is max(24h, warmup-hours).",
     )
     parser.add_argument(
         "--warmup-profit-target",
@@ -330,8 +330,11 @@ def main() -> None:
         candles_for_window = math.ceil(args.duration / timeframe_to_minutes(args.timeframe))
         limit = max(limit, candles_for_window)
     if args.warmup_hours > 0:
-        candles_for_day = math.ceil((24 * 60) / timeframe_to_minutes(args.timeframe))
-        limit = max(limit, candles_for_day)
+        # Fetch enough history for the warmup. Historically this was fixed at 24h;
+        # we now scale the lookback with warmup duration (minimum 24h for stability).
+        warmup_lookback_hours = max(24.0, float(args.warmup_hours))
+        candles_for_warmup = math.ceil((warmup_lookback_hours * 60) / timeframe_to_minutes(args.timeframe))
+        limit = max(limit, candles_for_warmup)
 
     base_run_dir = Path(config.RUNS_DIR)
     base_run_dir.mkdir(parents=True, exist_ok=True)
@@ -396,7 +399,7 @@ def main() -> None:
 
             if args.warmup_hours > 0:
                 print(
-                    f"Starting warmup for up to {args.warmup_hours:.2f}h on the last 24h window "
+                    f"Starting warmup for up to {args.warmup_hours:.2f}h on the last {max(24.0, float(args.warmup_hours)):.0f}h window "
                     f"(target portfolio >= {warmup_target:.2f})."
                 )
                 for event in run_loop(

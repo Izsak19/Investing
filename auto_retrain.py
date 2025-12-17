@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import random
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -19,6 +20,7 @@ from src.metrics import compute_max_drawdown
 from src.trainer import Trainer
 from src.persistence import atomic_write_text
 
+
 @dataclass
 class Metrics:
     final_value: float
@@ -28,6 +30,7 @@ class Metrics:
     realized_pnl: float
     baseline_final_value: float
     ma_baseline_final_value: float
+
 
 def timeframe_to_minutes(timeframe: str) -> float:
     if not timeframe:
@@ -40,12 +43,30 @@ def timeframe_to_minutes(timeframe: str) -> float:
     mult = {"m": 1, "h": 60, "d": 24 * 60}.get(unit)
     return qty * mult if mult else 1.0
 
-def fetch_last_24h(symbol: str, timeframe: str, offline: bool, cache: bool, cache_only: bool, cache_dir: Path) -> Tuple[pd.DataFrame, bool]:
+
+def fetch_last_24h(
+    symbol: str,
+    timeframe: str,
+    offline: bool,
+    cache: bool,
+    cache_only: bool,
+    cache_dir: Path,
+) -> Tuple[pd.DataFrame, bool]:
     minutes = timeframe_to_minutes(timeframe)
     candles_needed = math.ceil((24 * 60) / minutes)
-    feed = DataFeed(MarketConfig(symbol=symbol, timeframe=timeframe, limit=candles_needed,
-                                 offline=offline, cache=cache, cache_only=cache_only, cache_dir=cache_dir))
+    feed = DataFeed(
+        MarketConfig(
+            symbol=symbol,
+            timeframe=timeframe,
+            limit=candles_needed,
+            offline=offline,
+            cache=cache,
+            cache_only=cache_only,
+            cache_dir=cache_dir,
+        )
+    )
     return feed.fetch(include_indicators=True)
+
 
 def validate_frame(frame: pd.DataFrame) -> pd.DataFrame:
     expected = {"timestamp", "open", "high", "low", "close", "volume"}
@@ -56,6 +77,7 @@ def validate_frame(frame: pd.DataFrame) -> pd.DataFrame:
     if "timestamp" in cleaned.columns:
         cleaned = cleaned.sort_values("timestamp").drop_duplicates(subset="timestamp")
     return cleaned.reset_index(drop=True)
+
 
 def buy_and_hold_baseline(frame: pd.DataFrame, initial_cash: float) -> float:
     if frame.empty:
@@ -71,7 +93,10 @@ def buy_and_hold_baseline(frame: pd.DataFrame, initial_cash: float) -> float:
     sell_turn = gross * config.TURNOVER_PENALTY
     return gross - sell_fee - sell_turn
 
-def moving_average_crossover_baseline(frame: pd.DataFrame, initial_cash: float, fast: int = 10, slow: int = 30) -> float:
+
+def moving_average_crossover_baseline(
+    frame: pd.DataFrame, initial_cash: float, fast: int = 10, slow: int = 30
+) -> float:
     if frame.empty or len(frame) < slow:
         return initial_cash
     prices = frame["close"].astype(float)
@@ -81,7 +106,7 @@ def moving_average_crossover_baseline(frame: pd.DataFrame, initial_cash: float, 
     position = 0.0
     for i in range(1, len(frame)):
         price = float(prices.iloc[i])
-        prev_fast, prev_slow = float(fast_ma.iloc[i-1]), float(slow_ma.iloc[i-1])
+        prev_fast, prev_slow = float(fast_ma.iloc[i - 1]), float(slow_ma.iloc[i - 1])
         curr_fast, curr_slow = float(fast_ma.iloc[i]), float(slow_ma.iloc[i])
         cross_up = prev_fast <= prev_slow and curr_fast > curr_slow
         cross_down = prev_fast >= prev_slow and curr_fast < curr_slow
@@ -105,6 +130,7 @@ def moving_average_crossover_baseline(frame: pd.DataFrame, initial_cash: float, 
         cash = gross - fee - turn
     return cash
 
+
 def _walk_forward_returns_from_curve(equity_curve: Iterable[float], folds: int) -> list[float]:
     curve = list(equity_curve)
     if folds <= 1 or len(curve) < folds + 1:
@@ -118,14 +144,22 @@ def _walk_forward_returns_from_curve(equity_curve: Iterable[float], folds: int) 
         e = (k + 1) * n if k < folds - 1 else len(curve)
         if e - s < 2:
             continue
-        out.append((curve[e-1] - curve[s]) / max(curve[s], 1e-9))
+        out.append((curve[e - 1] - curve[s]) / max(curve[s], 1e-9))
         s = e
     return out
 
-def evaluate_agent(trainer: Trainer, frame: pd.DataFrame, *,
-                   initial_cash: float, run_dir: Path, run_id: str, data_is_live: bool,
-                   baseline_final_value: float | None = None,
-                   ma_baseline_final_value: float | None = None) -> Metrics:
+
+def evaluate_agent(
+    trainer: Trainer,
+    frame: pd.DataFrame,
+    *,
+    initial_cash: float,
+    run_dir: Path,
+    run_id: str,
+    data_is_live: bool,
+    baseline_final_value: float | None = None,
+    ma_baseline_final_value: float | None = None,
+) -> Metrics:
     eval_tr = Trainer(trainer.agent, initial_cash=initial_cash)
     eval_tr.last_data_is_live = data_is_live
     equity_curve: list[float] = []
@@ -145,22 +179,30 @@ def evaluate_agent(trainer: Trainer, frame: pd.DataFrame, *,
 
     # persist run metrics
     eval_tr._flush_trades_and_metrics(
-        run_dir, force=True, data_is_live=data_is_live,
+        run_dir,
+        force=True,
+        data_is_live=data_is_live,
         baseline_final_value=baseline_final_value,
         val_final_value=final_value if baseline_final_value is not None else None,
-        max_drawdown=max_dd, executed_trades=executed_trades,
+        max_drawdown=max_dd,
+        executed_trades=executed_trades,
         ma_baseline_final_value=ma_baseline_final_value,
     )
     total_reward = sum(r for *_, r in eval_tr.history)
     return Metrics(
-        final_value=final_value, executed_trades=executed_trades,
-        total_reward=total_reward, max_drawdown=max_dd, realized_pnl=realized_pnl,
+        final_value=final_value,
+        executed_trades=executed_trades,
+        total_reward=total_reward,
+        max_drawdown=max_dd,
+        realized_pnl=realized_pnl,
         baseline_final_value=baseline_final_value or 0.0,
         ma_baseline_final_value=ma_baseline_final_value or 0.0,
     )
 
+
 def snapshot_state(path: Path) -> str | None:
     return path.read_text() if path.exists() else None
+
 
 def restore_state(path: Path, snapshot: str | None) -> None:
     if snapshot is None:
@@ -170,16 +212,30 @@ def restore_state(path: Path, snapshot: str | None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, snapshot)
 
+
 def split_frame(frame: pd.DataFrame, validation_fraction: float) -> Tuple[pd.DataFrame, pd.DataFrame]:
     cutoff = max(1, int(len(frame) * (1 - validation_fraction)))
     return frame.iloc[:cutoff], frame.iloc[cutoff:]
 
-def train_agent(feature_frame: pd.DataFrame, steps: int | None, initial_cash: float, *,
-                run_id: str, run_dir: Path, data_is_live: bool) -> Trainer:
-    agent = BanditAgent()
+
+def train_agent(
+    feature_frame: pd.DataFrame,
+    steps: int | None,
+    initial_cash: float,
+    *,
+    run_id: str,
+    run_dir: Path,
+    data_is_live: bool,
+    posterior_scale: float | None = None,
+    forgetting_factor: float | None = None,
+) -> Trainer:
+    agent = BanditAgent(posterior_scale=posterior_scale, forgetting_factor=forgetting_factor)
     trainer = Trainer(agent, initial_cash=initial_cash)
     trainer.run(
-        feature_frame, max_steps=steps, run_id=run_id, run_dir=run_dir,
+        feature_frame,
+        max_steps=steps,
+        run_id=run_id,
+        run_dir=run_dir,
         checkpoint_every=config.DEFAULT_CHECKPOINT_EVERY,
         flush_trades_every=config.DEFAULT_FLUSH_TRADES_EVERY,
         keep_last=config.DEFAULT_KEEP_LAST_CHECKPOINTS,
@@ -187,9 +243,20 @@ def train_agent(feature_frame: pd.DataFrame, steps: int | None, initial_cash: fl
     )
     return trainer
 
-def run_cycle(args: argparse.Namespace, cycle: int, run_dir: Path, run_id: str) -> bool:
+
+def run_cycle(
+    args: argparse.Namespace,
+    cycle: int,
+    run_dir: Path,
+    run_id: str,
+    *,
+    best_snapshot: str | None,
+    best_val: float,
+) -> tuple[bool, str | None, float]:
     print(f"\n[cycle {cycle}] Fetching last 24h of {args.symbol} ({args.timeframe}).")
-    raw, is_live = fetch_last_24h(args.symbol, args.timeframe, args.offline, args.cache, args.cache_only, args.cache_dir)
+    raw, is_live = fetch_last_24h(
+        args.symbol, args.timeframe, args.offline, args.cache, args.cache_only, args.cache_dir
+    )
     validated = validate_frame(raw)
     if validated.empty:
         raise RuntimeError("No rows available after indicator computation; try increasing --timeframe limit.")
@@ -198,26 +265,54 @@ def run_cycle(args: argparse.Namespace, cycle: int, run_dir: Path, run_id: str) 
         raise RuntimeError("Validation split produced an empty frame; reduce --validation-fraction.")
 
     state_path = Path(config.STATE_PATH)
-    backup = snapshot_state(state_path)
+    backup = best_snapshot
 
-    trainer = train_agent(train_frame, steps=args.train_steps, initial_cash=args.initial_cash,
-                          run_id=run_id, run_dir=run_dir, data_is_live=is_live)
+    if getattr(args, "randomize_seed", False):
+        seed = int(time.time()) ^ (cycle * 1_000_003)
+    else:
+        seed = int(getattr(args, "seed", 1337) or 1337)
+    random.seed(seed)
+    np.random.seed(seed)
+
+    trainer = train_agent(
+        train_frame,
+        steps=args.train_steps,
+        initial_cash=args.initial_cash,
+        run_id=run_id,
+        run_dir=run_dir,
+        data_is_live=is_live,
+        posterior_scale=getattr(args, "posterior_scale", None),
+        forgetting_factor=getattr(args, "forgetting_factor", None),
+    )
 
     val_bh = buy_and_hold_baseline(val_frame, args.initial_cash)
     val_ma = moving_average_crossover_baseline(val_frame, args.initial_cash)
-    val_m = evaluate_agent(trainer, val_frame, initial_cash=args.initial_cash, run_dir=run_dir,
-                           run_id=run_id, data_is_live=is_live,
-                           baseline_final_value=val_bh, ma_baseline_final_value=val_ma)
-    back_m = evaluate_agent(trainer, validated, initial_cash=args.initial_cash, run_dir=run_dir,
-                            run_id=run_id, data_is_live=is_live,
-                            baseline_final_value=buy_and_hold_baseline(validated, args.initial_cash),
-                            ma_baseline_final_value=moving_average_crossover_baseline(validated, args.initial_cash))
+    val_m = evaluate_agent(
+        trainer,
+        val_frame,
+        initial_cash=args.initial_cash,
+        run_dir=run_dir,
+        run_id=run_id,
+        data_is_live=is_live,
+        baseline_final_value=val_bh,
+        ma_baseline_final_value=val_ma,
+    )
+    back_m = evaluate_agent(
+        trainer,
+        validated,
+        initial_cash=args.initial_cash,
+        run_dir=run_dir,
+        run_id=run_id,
+        data_is_live=is_live,
+        baseline_final_value=buy_and_hold_baseline(validated, args.initial_cash),
+        ma_baseline_final_value=moving_average_crossover_baseline(validated, args.initial_cash),
+    )
 
-    thr_value = val_bh * (1 + args.min_profit_threshold / 100.0)
+    baseline_for_threshold = (
+        val_bh if getattr(args, "profit_target", "cash") == "buyhold" else float(args.initial_cash)
+    )
+    thr_value = baseline_for_threshold * (1 + args.min_profit_threshold / 100.0)
 
-    # walk-forward guard on validation equity
-    # (re-use the validation pass equity curve by recomputing quickly)
-    # For speed/clarity we compute folds on price-proxy curve using the agent again with TD disabled.
     wf_equity = []
     probe = Trainer(trainer.agent, initial_cash=args.initial_cash)
     for i in range(max(0, len(val_frame) - 1)):
@@ -248,22 +343,47 @@ def run_cycle(args: argparse.Namespace, cycle: int, run_dir: Path, run_id: str) 
     wf_ok = (not args.require_walkforward_nonnegative) or (wf_min >= 0.0)
 
     if profitable and drawdown_ok and trades_ok and wf_ok:
-        print(f"Cycle {cycle} passed threshold (val {val_m.final_value:.2f} >= target {thr_value:.2f}). Keeping updated agent state.")
-        return True
+        print(
+            f"Cycle {cycle} passed threshold (val {val_m.final_value:.2f} >= target {thr_value:.2f}). Keeping updated agent state."
+        )
+        return True, snapshot_state(state_path), float(val_m.final_value)
+
+    improve_delta = float(getattr(args, "accept_improvement_delta", 0.0) or 0.0)
+    max_loss = float(getattr(args, "accept_max_loss", 0.0) or 0.0)
+    loss_floor = float(args.initial_cash) - max_loss if max_loss > 0 else float("-inf")
+    improved = (val_m.final_value >= (best_val + improve_delta)) and (val_m.final_value >= loss_floor)
+
+    if getattr(args, "accept_if_improves", False) and improved and drawdown_ok and trades_ok and wf_ok:
+        print(
+            f"Cycle {cycle} kept by improvement rule (val {val_m.final_value:.2f} > best {best_val:.2f} + {improve_delta:.2f})."
+        )
+        return True, snapshot_state(state_path), float(val_m.final_value)
 
     print(
         f"Cycle {cycle} below threshold (val {val_m.final_value:.2f} < target {thr_value:.2f} "
-        f"or drawdown/trade/walkforward limits exceeded). Restoring previous agent state."
+        f"or drawdown/trade/walkforward limits exceeded). Restoring previous best agent state."
     )
     restore_state(state_path, backup)
-    return False
+    return False, backup, float(best_val)
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Auto-retrain on the last 24h of market data until profit target is met.")
     p.add_argument("--symbol", default=config.DEFAULT_SYMBOL)
     p.add_argument("--timeframe", default=config.DEFAULT_TIMEFRAME)
     p.add_argument("--offline", action="store_true")
-    p.add_argument("--min-profit-threshold", type=float, default=0.0)
+    p.add_argument(
+        "--min-profit-threshold",
+        type=float,
+        default=0.0,
+        help="Profit threshold (percent) applied to the chosen baseline for validation acceptance.",
+    )
+    p.add_argument(
+        "--profit-target",
+        choices=["cash", "buyhold"],
+        default="cash",
+        help="Baseline used for acceptance: 'cash' (no-trade) or 'buyhold' on the validation slice.",
+    )
     p.add_argument("--max-drawdown", type=float, default=None)
     p.add_argument("--max-trades", type=int, default=None)
     p.add_argument("--max-cycles", type=int, default=5)
@@ -275,31 +395,104 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cache-only", action="store_true")
     p.add_argument("--cache-dir", type=Path, default=Path("data/cache"))
     p.add_argument("--run-id", default=None)
-    p.add_argument("--require-walkforward-nonnegative", action="store_true",
-                   help="Only accept updates if min walk-forward fold return on validation is >= 0.")
+    p.add_argument(
+        "--require-walkforward-nonnegative",
+        action="store_true",
+        help="Only accept updates if min walk-forward fold return on validation is >= 0.",
+    )
+
+    p.add_argument(
+        "--posterior-scale",
+        type=float,
+        default=None,
+        help="Override Thompson sampling scale (higher = more exploration).",
+    )
+    p.add_argument(
+        "--forgetting-factor",
+        type=float,
+        default=None,
+        help="Override forgetting factor (lower = adapts faster; 1.0 = no forgetting).",
+    )
+    p.add_argument("--seed", type=int, default=1337, help="Base RNG seed (used when --randomize-seed is off).")
+    p.add_argument("--randomize-seed", action="store_true", help="Use a different RNG seed each cycle.")
+
+    p.add_argument(
+        "--accept-if-improves",
+        action="store_true",
+        help="Accept a candidate if it improves validation final_value over best-so-far, even if it doesn't beat cash.",
+    )
+    p.add_argument(
+        "--accept-improvement-delta",
+        type=float,
+        default=0.25,
+        help="Minimum absolute $ improvement over best-so-far to accept under --accept-if-improves.",
+    )
+    p.add_argument(
+        "--accept-max-loss",
+        type=float,
+        default=2.00,
+        help="Maximum allowed loss vs initial_cash (in $) for improvement-based acceptance.",
+    )
+
+    p.add_argument(
+        "--eval-require-min-trades",
+        type=int,
+        default=10,
+        help="Minimum executed trades required for an eval candidate to be eligible.",
+    )
+    p.add_argument(
+        "--eval-max-turnover-per-1000",
+        type=float,
+        default=None,
+        help="Max turnover per 1000 steps allowed for an eval candidate (None disables).",
+    )
+    p.add_argument(
+        "--promotion-min-score-delta",
+        type=float,
+        default=1e-6,
+        help="Minimum score improvement required to promote a checkpoint.",
+    )
     return p.parse_args()
+
 
 def main() -> None:
     args = parse_args()
-    base = Path(config.RUNS_DIR); base.mkdir(parents=True, exist_ok=True)
+    base = Path(config.RUNS_DIR)
+    base.mkdir(parents=True, exist_ok=True)
+
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     run_id = args.run_id or f"auto_{args.symbol.replace('/', '_')}_{args.timeframe}_{timestamp}"
-    run_dir = base / run_id; run_dir.mkdir(parents=True, exist_ok=True)
-    # Write a pointer so tools can reference the latest learning cycle without typing the run_id.
+    run_dir = base / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
     try:
         from src.eval.latest import write_latest_run
+
         write_latest_run(runs_root=base, run_dir=run_dir, symbol=args.symbol, timeframe=args.timeframe)
     except Exception as exc:
         print(f"[latest] could not write LATEST.json: {exc}")
+
+    state_path = Path(config.STATE_PATH)
+    best_snapshot = snapshot_state(state_path)
+    best_val = float(args.initial_cash)
+
     for cycle in range(1, args.max_cycles + 1):
         try:
-            ok = run_cycle(args, cycle, run_dir, run_id)
-            # After each learning cycle: write latest pointer + run offline evaluator sweep.
+            ok, best_snapshot, best_val = run_cycle(
+                args,
+                cycle,
+                run_dir,
+                run_id,
+                best_snapshot=best_snapshot,
+                best_val=best_val,
+            )
+
             try:
                 from src.eval.latest import write_latest_run
                 from src.eval.types import EvalConfig
                 from src.eval.orchestrator import sweep_checkpoints, maybe_promote
                 from src.eval.promotion import PromotionPolicy
+
                 write_latest_run(runs_root=base, run_dir=run_dir, symbol=args.symbol, timeframe=args.timeframe)
                 ecfg = EvalConfig(
                     symbol=args.symbol,
@@ -309,12 +502,14 @@ def main() -> None:
                     offline=args.offline,
                     cache=args.cache,
                     cache_only=args.cache_only,
+                    require_min_trades=int(args.eval_require_min_trades),
+                    max_turnover_per_1000_steps=(
+                        None if args.eval_max_turnover_per_1000 is None else float(args.eval_max_turnover_per_1000)
+                    ),
                 )
                 sweep = sweep_checkpoints(run_dir=run_dir, cfg=ecfg, steps=None)
-                # Tail gates: block promotions with ugly left-tail step PnL.
-                # Defaults are conservative; tune per symbol/timeframe.
                 ppolicy = PromotionPolicy(
-                    min_score_delta=0.0,
+                    min_score_delta=float(args.promotion_min_score_delta),
                     require_positive_total_return=False,
                     min_pnl_n=200,
                     max_p05_loss=1.0,
@@ -323,17 +518,21 @@ def main() -> None:
                 _, msg = maybe_promote(sweep=sweep, run_dir=run_dir, policy=ppolicy)
                 print(f"[evaluator] {msg}")
             except Exception:
-                # If evaluator wiring fails, training loop should still proceed.
                 pass
-            if ok:
+
+            target_val = float(args.initial_cash) * (1 + args.min_profit_threshold / 100.0)
+            if ok and best_val >= target_val:
                 break
+
         except Exception as exc:
             print(f"Cycle {cycle} failed: {exc}")
             if cycle >= args.max_cycles:
                 raise
+
         if cycle < args.max_cycles and args.sleep_seconds > 0:
             print(f"Sleeping {args.sleep_seconds:.1f}s before next cycle.")
             time.sleep(args.sleep_seconds)
+
 
 if __name__ == "__main__":
     main()
