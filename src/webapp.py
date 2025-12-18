@@ -49,6 +49,10 @@ class TradeEvent:
     action_hold: float
     action_buy: float
     action_sell: float
+    avg_win_pnl: float
+    avg_loss_pnl: float
+    win_loss_ratio: float
+    expectancy_pnl_per_sell_leg: float
 
 
 class WebDashboard:
@@ -153,6 +157,10 @@ class WebDashboard:
         sharpe_ratio: float,
         max_drawdown: float,
         action_distribution: Dict[str, float] | None = None,
+        avg_win_pnl: float = 0.0,
+        avg_loss_pnl: float = 0.0,
+        win_loss_ratio: float = 0.0,
+        expectancy_pnl_per_sell_leg: float = 0.0,
     ) -> None:
         ts_str = "" if timestamp is None else str(timestamp)
         action_distribution = action_distribution or {}
@@ -197,6 +205,10 @@ class WebDashboard:
                 action_hold=float(action_distribution.get("hold", 0.0)),
                 action_buy=float(action_distribution.get("buy", 0.0)),
                 action_sell=float(action_distribution.get("sell", 0.0)),
+                avg_win_pnl=float(avg_win_pnl),
+                avg_loss_pnl=float(avg_loss_pnl),
+                win_loss_ratio=float(win_loss_ratio),
+                expectancy_pnl_per_sell_leg=float(expectancy_pnl_per_sell_leg),
             )
             self._events.append(event)
             self._latest_metrics = {
@@ -226,6 +238,10 @@ class WebDashboard:
                 "action_hold": float(action_distribution.get("hold", 0.0)),
                 "action_buy": float(action_distribution.get("buy", 0.0)),
                 "action_sell": float(action_distribution.get("sell", 0.0)),
+                "avg_win_pnl": float(avg_win_pnl),
+                "avg_loss_pnl": float(avg_loss_pnl),
+                "win_loss_ratio": float(win_loss_ratio),
+                "expectancy_pnl_per_sell_leg": float(expectancy_pnl_per_sell_leg),
             }
 
     @property

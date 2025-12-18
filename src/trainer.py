@@ -74,6 +74,11 @@ class TrainerState:
     buy_legs: int = 0
     sell_legs: int = 0
     winning_sell_legs: int = 0
+    # Per-sell-leg net PnL diagnostics (used for avg win/loss and expectancy)
+    win_pnl_sum: float = 0.0
+    loss_pnl_sum: float = 0.0
+    win_pnl_count: int = 0
+    loss_pnl_count: int = 0
     # legacy fields kept for backwards compatibility (older dashboards/state)
     total_trades: int = 0
     successful_trades: int = 0
@@ -163,6 +168,11 @@ class Trainer:
         self.buy_legs = 0
         self.sell_legs = 0
         self.winning_sell_legs = 0
+        # PnL diagnostics (per SELL leg, net of frictions)
+        self._win_pnl_sum: float = 0.0
+        self._loss_pnl_sum: float = 0.0
+        self._win_pnl_count: int = 0
+        self._loss_pnl_count: int = 0
         # legacy counters (kept for compatibility)
         self.steps = 0
         self.sell_trades = 0
@@ -251,6 +261,10 @@ class Trainer:
         self.buy_legs = 0
         self.sell_legs = 0
         self.winning_sell_legs = 0
+        self._win_pnl_sum = 0.0
+        self._loss_pnl_sum = 0.0
+        self._win_pnl_count = 0
+        self._loss_pnl_count = 0
         self.sell_trades = 0
         self.winning_sells = 0
         self.gate_blocks = 0
@@ -413,6 +427,28 @@ class Trainer:
         if getattr(self, 'sell_legs', 0) > 0:
             return float(getattr(self, 'winning_sell_legs', 0)) / max(1, int(getattr(self, 'sell_legs', 0)))
         return self.winning_sells / max(1, self.sell_trades)
+
+    @property
+    def avg_win_pnl(self) -> float:
+        return 0.0 if self._win_pnl_count <= 0 else (self._win_pnl_sum / self._win_pnl_count)
+
+    @property
+    def avg_loss_pnl(self) -> float:
+        # negative value (average losing SELL-leg PnL)
+        return 0.0 if self._loss_pnl_count <= 0 else (self._loss_pnl_sum / self._loss_pnl_count)
+
+    @property
+    def win_loss_ratio(self) -> float:
+        aw = self.avg_win_pnl
+        al = self.avg_loss_pnl
+        denom = abs(al) if al != 0 else 0.0
+        return 0.0 if denom <= 0 else (aw / denom)
+
+    @property
+    def expectancy_pnl_per_sell_leg(self) -> float:
+        total_legs = self._win_pnl_count + self._loss_pnl_count
+        total = self._win_pnl_sum + self._loss_pnl_sum
+        return 0.0 if total_legs <= 0 else (total / total_legs)
 
     @property
     def action_distribution(self) -> dict[str, float]:
@@ -674,9 +710,15 @@ class Trainer:
                 # Pre-mask veto: the action never becomes proposed_action, so without
                 # this counter it would be invisible in gate_blocks/gate_reason_counts.
                 self._premask_gate_reason_counter["cost_gate_buy"] += 1
-            if "sell" in feasible and sell_margin < cost_edge:
-                feasible.remove("sell")
-                self._premask_gate_reason_counter["cost_gate_sell"] += 1
+            # SELL: do not pre-mask exits on cost edge. Exits are *risk reducing* and the agent
+            # must always have the option to close exposure; otherwise the system can HOLD-freeze
+            # in-position for thousands of steps when margins are small.
+            # We still account for real execution frictions in PnL and learning reward.
+            if "sell" in feasible and self.portfolio.position <= 0:
+                # (defensive) Only apply sell cost gating when flat (should be rare).
+                if sell_margin < cost_edge:
+                    feasible.remove("sell")
+                    self._premask_gate_reason_counter["cost_gate_sell"] += 1
 
             # 2) Cooldown feasibility for SELL: if we are inside the trade-gap cooldown,
             # only allow SELL proposals when they qualify for the strong-exit bypass.
@@ -729,12 +771,11 @@ class Trainer:
                 gate_blocked = True
                 self.gate_blocks += 1
                 self._gate_reason_counter["cost_gate"] += 1
-            elif action == "sell" and sell_margin < cost_edge:
-                action = "hold"
-                hold_reason = "cost_gate"
-                gate_blocked = True
-                self.gate_blocks += 1
-                self._gate_reason_counter["cost_gate"] += 1
+            elif action == "sell":
+                # Do not cost-gate exits. SELL reduces exposure and is required for recovery from
+                # bad entries; cost-gating SELL creates permanent HOLD regimes in live 5m runs.
+                # Execution frictions are still applied in portfolio PnL and learning reward.
+                pass
 
         # --- adaptive cooldown (regime + turnover aware) ----------------------
         # NOTE: eff_gap/eff_hold and gap_ok/hold_ok are computed earlier (before act())
@@ -874,19 +915,13 @@ class Trainer:
         turnover_budget = self.initial_cash * self.turnover_budget_multiplier
         turnover_now = float(sum(self._turnover_window))
         turnover_stressed = turnover_now > (turnover_budget * float(getattr(config, 'TURNOVER_HARD_BLOCK_MULT', 1.0)))
-        if (not warmup_active) and turnover_stressed and action in ("buy", "sell"):
-            if action == "buy":
-                action = "hold"
-                hold_reason = hold_reason or "turnover_budget"
-                budget_blocked = True
-                self.budget_blocks += 1
-            elif action == "sell":
-                # only allow sell-through when the edge is meaningfully above costs
-                if sell_margin < (2.0 * cost_edge):
-                    action = "hold"
-                    hold_reason = hold_reason or "turnover_budget"
-                    budget_blocked = True
-                    self.budget_blocks += 1
+        # Turnover budget is meant to stop *new exposure* (BUY) when the strategy is
+        # churning fees. It must NOT block exits; otherwise you get permanent HOLD regimes.
+        if (not warmup_active) and turnover_stressed and action == "buy":
+            action = "hold"
+            hold_reason = hold_reason or "turnover_budget"
+            budget_blocked = True
+            self.budget_blocks += 1
 
         # --- trade-rate throttling (anti-churn) -------------------------------
         # Count executed trade *legs* over a rolling step window and stop opening
@@ -894,21 +929,15 @@ class Trainer:
         # cooldowns prevent immediate flip-flops; this prevents slow fee bleed.
         tr_window = int(getattr(config, 'TRADE_RATE_WINDOW_STEPS', 0) or 0)
         tr_max = int(getattr(config, 'MAX_TRADES_PER_WINDOW', 0) or 0)
-        if (not warmup_active) and (not stuck_relax) and tr_window > 0 and tr_max > 0 and action in ("buy", "sell"):
+        # Trade-rate throttling prevents churn on entries. It must NOT block exits; otherwise
+        # long runs can freeze into HOLD forever after hitting the trade limit once.
+        if (not warmup_active) and (not stuck_relax) and tr_window > 0 and tr_max > 0 and action == "buy":
             recent_trades = int(sum(getattr(self, '_trade_count_window', [])))
             if recent_trades >= tr_max:
-                if action == "buy":
-                    action = "hold"
-                    hold_reason = hold_reason or "trade_rate"
-                    budget_blocked = True
-                    self.budget_blocks += 1
-                elif action == "sell":
-                    mult = float(getattr(config, 'TRADE_RATE_SELL_BYPASS_EDGE_MULT', 3.0))
-                    if sell_margin < (mult * cost_edge):
-                        action = "hold"
-                        hold_reason = hold_reason or "trade_rate"
-                        budget_blocked = True
-                        self.budget_blocks += 1
+                action = "hold"
+                hold_reason = hold_reason or "trade_rate"
+                budget_blocked = True
+                self.budget_blocks += 1
 
         trade_executed = False
         fee_paid = 0.0
@@ -1285,9 +1314,15 @@ class Trainer:
                 # We stash it during execution in entry_price_for_leg.
                 entry_price_for_leg = locals().get("entry_price_for_leg", self.portfolio.entry_price)
                 leg_qty = notional_traded / max(price_now, 1e-9)
-                leg_pnl = (price_now - entry_price_for_leg) * leg_qty
-                if leg_pnl > 0:
+                # entry_price_for_leg includes buy-side frictions via basis; subtract sell frictions for net leg PnL
+                leg_pnl_net = (price_now - entry_price_for_leg) * leg_qty - fee_paid - slippage_paid
+                if leg_pnl_net > 0:
                     self.winning_sell_legs += 1
+                    self._win_pnl_sum += float(leg_pnl_net)
+                    self._win_pnl_count += 1
+                elif leg_pnl_net < 0:
+                    self._loss_pnl_sum += float(leg_pnl_net)
+                    self._loss_pnl_count += 1
 
         # legacy full-close sell win rate (kept for backward compatibility)
         if action == "sell" and trade_executed:
@@ -1374,6 +1409,10 @@ class Trainer:
             "buy_legs": int(getattr(self, 'buy_legs', 0)),
             "sell_legs": int(getattr(self, 'sell_legs', 0)),
             "winning_sell_legs": int(getattr(self, 'winning_sell_legs', 0)),
+            "avg_win_pnl": float(getattr(self, 'avg_win_pnl', 0.0)),
+            "avg_loss_pnl": float(getattr(self, 'avg_loss_pnl', 0.0)),
+            "win_loss_ratio": float(getattr(self, 'win_loss_ratio', 0.0)),
+            "expectancy_pnl_per_sell_leg": float(getattr(self, 'expectancy_pnl_per_sell_leg', 0.0)),
             "avg_notional_per_trade": (float(getattr(self, 'total_notional_traded', 0.0)) / max(1, int(getattr(self, 'executed_trade_count', 0)))) if int(getattr(self, 'executed_trade_count', 0)) > 0 else 0.0,
             "turnover_per_1000_steps": (sum(self._turnover_window) / max(1, self.total_steps)) * 1000.0,
             # legacy field name kept (now uses executed_trade_count by default)
@@ -1423,6 +1462,10 @@ class Trainer:
             buy_legs=int(getattr(self, 'buy_legs', 0)),
             sell_legs=int(getattr(self, 'sell_legs', 0)),
             winning_sell_legs=int(getattr(self, 'winning_sell_legs', 0)),
+            win_pnl_sum=float(getattr(self, '_win_pnl_sum', 0.0)),
+            loss_pnl_sum=float(getattr(self, '_loss_pnl_sum', 0.0)),
+            win_pnl_count=int(getattr(self, '_win_pnl_count', 0)),
+            loss_pnl_count=int(getattr(self, '_loss_pnl_count', 0)),
             # legacy fields
             total_trades=len(self.history),
             successful_trades=self.winning_sells,
@@ -1580,6 +1623,10 @@ def resume_from(run_dir: Path, agent: BanditAgent, trainer: Trainer) -> None:
         trainer.buy_legs = int(getattr(state, 'buy_legs', 0))
         trainer.sell_legs = int(getattr(state, 'sell_legs', 0))
         trainer.winning_sell_legs = int(getattr(state, 'winning_sell_legs', 0))
+        trainer._win_pnl_sum = float(getattr(state, 'win_pnl_sum', 0.0))
+        trainer._loss_pnl_sum = float(getattr(state, 'loss_pnl_sum', 0.0))
+        trainer._win_pnl_count = int(getattr(state, 'win_pnl_count', 0))
+        trainer._loss_pnl_count = int(getattr(state, 'loss_pnl_count', 0))
         trainer.sell_trades = state.sell_trades
         trainer.winning_sells = state.winning_sells
         trainer.last_trade_step = state.last_trade_step

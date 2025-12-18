@@ -375,12 +375,16 @@ class BanditAgent:
         action, sampled, means = self.act_with_scores(
             features, allowed=allowed, step=step, posterior_scale_override=posterior_scale_override
         )
-        # Confidence-based gating: avoid churn when edge is weak
+        # Confidence-based gating: avoid churn when edge is weak.
+        # NOTE: this threshold is intentionally *separate* from EDGE_THRESHOLD, which is also
+        # used for cost-aware gating and regime thresholds. Re-using EDGE_THRESHOLD here can
+        # accidentally force the policy into permanent HOLD as Thompson sampling decays.
         if allowed is not None and 'hold' in allowed:
             vals = np.asarray(sampled)
             idxs = [ACTIONS.index(a) for a in allowed]
             ranked = np.sort(vals[idxs])
-            if len(ranked) >= 2 and (ranked[-1] - ranked[-2]) < config.EDGE_THRESHOLD:
+            confidence_gap = float(ranked[-1] - ranked[-2]) if len(ranked) >= 2 else 0.0
+            if len(ranked) >= 2 and confidence_gap < float(getattr(config, 'CONFIDENCE_HOLD_THRESHOLD', 0.0)):
                 return 'hold'
         return action
 

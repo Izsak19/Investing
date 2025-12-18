@@ -63,7 +63,7 @@ def parse_args() -> argparse.Namespace:
         "--warmup-hours",
         type=float,
         default=0.0,
-        help="Optional preflight duration (hours) on the last 24h window before switching to live streaming.",
+        help="Optional preflight duration (hours) on a lookback window before switching to live streaming. The lookback is max(24h, warmup-hours).",
     )
     parser.add_argument(
         "--warmup-profit-target",
@@ -177,6 +177,34 @@ def run_loop(
             if checkpoint_every > 0 and trainer.steps % checkpoint_every == 0:
                 trainer.agent.save(run_dir=run_dir, checkpoint=True, keep_last=keep_last)
                 trainer._save_trainer_state(run_dir, run_id, checkpoint=True, keep_last=keep_last)
+        # Kill-switch: stop early if the strategy is structurally losing (expectancy) and drawdown is bad.
+        if (
+            getattr(config, 'ENABLE_KILL_SWITCH', False)
+            and train
+            and getattr(trainer, 'sell_legs', 0) >= getattr(config, 'KILL_SWITCH_MIN_SELL_LEGS', 0)
+            and getattr(trainer, 'expectancy_pnl_per_sell_leg', 0.0) <= getattr(config, 'KILL_SWITCH_EXPECTANCY_PNL_PER_SELL_LEG', -1e9)
+            and getattr(trainer, 'max_drawdown', 0.0) >= getattr(config, 'KILL_SWITCH_MAX_DRAWDOWN', 1.0)
+        ):
+            print(
+                f"Kill-switch triggered at step {idx}: "
+                f"expectancy={getattr(trainer,'expectancy_pnl_per_sell_leg',0.0):+.4f}, "
+                f"dd={getattr(trainer,'max_drawdown',0.0):.2%}, sells={getattr(trainer,'sell_legs',0)}"
+            )
+            trainer._flush_trades_and_metrics(run_dir, force=True, data_is_live=data_is_live)
+            break
+
+        # Hard guardrail on absolute trade count (prevents runaway churn loops).
+        if (
+            getattr(config, 'ENABLE_KILL_SWITCH', False)
+            and train
+            and getattr(trainer, 'executed_trade_count', 0) >= getattr(config, 'KILL_SWITCH_MAX_TRADES', 10**9)
+        ):
+            print(
+                f"Kill-switch trade cap reached at step {idx}: executed_trades={getattr(trainer,'executed_trade_count',0)}"
+            )
+            trainer._flush_trades_and_metrics(run_dir, force=True, data_is_live=data_is_live)
+            break
+
         yield idx, row, result, after_trade_value, mtm_delta, trade_impact
 
         idx += 1
@@ -233,6 +261,34 @@ def stream_live(
                 trainer.agent.save(run_dir=run_dir, checkpoint=True, keep_last=keep_last)
                 trainer._save_trainer_state(run_dir, run_id, checkpoint=True, keep_last=keep_last)
 
+            # Kill-switch: stop early if expectancy is clearly negative and drawdown is bad.
+            if (
+                getattr(config, "ENABLE_KILL_SWITCH", False)
+                and getattr(trainer, "sell_legs", 0) >= getattr(config, "KILL_SWITCH_MIN_SELL_LEGS", 0)
+                and getattr(trainer, "expectancy_pnl_per_sell_leg", 0.0)
+                <= getattr(config, "KILL_SWITCH_EXPECTANCY_PNL_PER_SELL_LEG", -1e9)
+                and getattr(trainer, "max_drawdown", 0.0) >= getattr(config, "KILL_SWITCH_MAX_DRAWDOWN", 1.0)
+            ):
+                print(
+                    f"Kill-switch triggered at step {idx}: "
+                    f"expectancy={getattr(trainer,'expectancy_pnl_per_sell_leg',0.0):+.4f}, "
+                    f"dd={getattr(trainer,'max_drawdown',0.0):.2%}, sells={getattr(trainer,'sell_legs',0)}"
+                )
+                trainer._flush_trades_and_metrics(run_dir, force=True, data_is_live=is_live)
+                return
+
+            # Hard guardrail on absolute trade count (prevents runaway churn loops).
+            if (
+                getattr(config, "ENABLE_KILL_SWITCH", False)
+                and getattr(trainer, "executed_trade_count", 0) >= getattr(config, "KILL_SWITCH_MAX_TRADES", 10**9)
+            ):
+                print(
+                    f"Kill-switch trade cap reached at step {idx}: "
+                    f"executed_trades={getattr(trainer,'executed_trade_count',0)}"
+                )
+                trainer._flush_trades_and_metrics(run_dir, force=True, data_is_live=is_live)
+                return
+
             yield idx, row, result, after_trade_value, mtm_delta, trade_impact
 
             idx += 1
@@ -253,7 +309,18 @@ def _initialize_offline_seeds(seed: int, run_dir: Path) -> None:
 
 def main() -> None:
     args = parse_args()
+    # Apply requested profile first.
     config.apply_profile(args.profile)
+    # Professional default: for 5m and above, be conservative unless user explicitly chose a profile.
+    # This prevents fee-death-by-churn when users forget --profile.
+    try:
+        tf_min = timeframe_to_minutes(args.timeframe)
+    except Exception:
+        tf_min = None
+    if args.profile is None and tf_min is not None and tf_min >= 5:
+        # 5m+: default to a profitability-focused preset to avoid churn and to
+        # enforce hard risk exits by default.
+        config.apply_profile('tf_5m_profit_focus')
     eval_mode = args.eval
     if eval_mode and args.continuous:
         print("--eval disables --continuous; running a bounded evaluation pass instead.")
@@ -265,8 +332,11 @@ def main() -> None:
         candles_for_window = math.ceil(args.duration / timeframe_to_minutes(args.timeframe))
         limit = max(limit, candles_for_window)
     if args.warmup_hours > 0:
-        candles_for_day = math.ceil((24 * 60) / timeframe_to_minutes(args.timeframe))
-        limit = max(limit, candles_for_day)
+        # Fetch enough history for the warmup. Historically this was fixed at 24h;
+        # we now scale the lookback with warmup duration (minimum 24h for stability).
+        warmup_lookback_hours = max(24.0, float(args.warmup_hours))
+        candles_for_warmup = math.ceil((warmup_lookback_hours * 60) / timeframe_to_minutes(args.timeframe))
+        limit = max(limit, candles_for_warmup)
 
     base_run_dir = Path(config.RUNS_DIR)
     base_run_dir.mkdir(parents=True, exist_ok=True)
@@ -331,7 +401,7 @@ def main() -> None:
 
             if args.warmup_hours > 0:
                 print(
-                    f"Starting warmup for up to {args.warmup_hours:.2f}h on the last 24h window "
+                    f"Starting warmup for up to {args.warmup_hours:.2f}h on the last {max(24.0, float(args.warmup_hours)):.0f}h window "
                     f"(target portfolio >= {warmup_target:.2f})."
                 )
                 for event in run_loop(
@@ -453,6 +523,10 @@ def main() -> None:
                             sharpe_ratio=trainer.sharpe_ratio,
                             max_drawdown=trainer.max_drawdown,
                             action_distribution=trainer.action_distribution,
+                            avg_win_pnl=getattr(trainer, 'avg_win_pnl', 0.0),
+                            avg_loss_pnl=getattr(trainer, 'avg_loss_pnl', 0.0),
+                            win_loss_ratio=getattr(trainer, 'win_loss_ratio', 0.0),
+                            expectancy_pnl_per_sell_leg=getattr(trainer, 'expectancy_pnl_per_sell_leg', 0.0),
                         )
                     yield (
                         step,
@@ -473,6 +547,10 @@ def main() -> None:
                         trainer.gate_blocks,
                         trainer.timing_blocks,
                         trainer.budget_blocks,
+                        getattr(trainer, 'avg_win_pnl', 0.0),
+                        getattr(trainer, 'avg_loss_pnl', 0.0),
+                        getattr(trainer, 'win_loss_ratio', 0.0),
+                        getattr(trainer, 'expectancy_pnl_per_sell_leg', 0.0),
                     )
 
             render(enrich(loop))
