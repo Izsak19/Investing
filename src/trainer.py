@@ -665,6 +665,23 @@ class Trainer:
                 if since_last_trade >= strong_min_gap:
                     allowed_actions.append("sell")
 
+        # ------------------------------------------------------------------
+        # Turnover feasibility pre-mask: if we're already beyond the hard
+        # turnover budget in the recent window, do not even offer BUY.
+        #
+        # Why: otherwise the agent keeps proposing BUY and later gets converted
+        # to HOLD with hold_reason="turnover_budget", inflating budget_blocks and
+        # weakening the learning signal.
+        # ------------------------------------------------------------------
+        if (not warmup_active) and ("buy" in allowed_actions):
+            turnover_budget = self.initial_cash * self.turnover_budget_multiplier
+            turnover_now = float(sum(self._turnover_window))
+            hard_mult = float(getattr(config, 'TURNOVER_HARD_BLOCK_MULT', 1.0))
+            turnover_stressed = turnover_now > (turnover_budget * hard_mult)
+            if turnover_stressed:
+                allowed_actions = [a for a in allowed_actions if a != "buy"]
+                self._premask_gate_reason_counter["turnover_budget_buy"] += 1
+
         # (moved earlier) stuck adaptation + regime edge adjustment are computed before action masking
 
         if forced_action is not None:
@@ -921,7 +938,6 @@ class Trainer:
             action = "hold"
             hold_reason = hold_reason or "turnover_budget"
             budget_blocked = True
-            self.budget_blocks += 1
 
         # --- trade-rate throttling (anti-churn) -------------------------------
         # Count executed trade *legs* over a rolling step window and stop opening
@@ -937,7 +953,6 @@ class Trainer:
                 action = "hold"
                 hold_reason = hold_reason or "trade_rate"
                 budget_blocked = True
-                self.budget_blocks += 1
 
         trade_executed = False
         fee_paid = 0.0

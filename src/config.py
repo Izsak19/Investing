@@ -471,20 +471,32 @@ PROFILES = {
         "POSTERIOR_SCALE_MIN": 0.006,
         "FORGETTING_FACTOR": 0.997,
 
-        # Require strong edge after all-in costs (fee + slippage + safety margin).
-        "EDGE_THRESHOLD": 0.0100,
-        "COST_EDGE_MULT": 4.2,
-        "EDGE_SAFETY_MARGIN": 0.00100,
+        # Require edge that clears all-in costs (fee + slippage + safety margin).
+        # Tuned to reduce marginal entries that can't beat friction while still allowing
+        # enough trades to learn / validate on 5m.
+        # Raise edge requirement to reduce BUY proposals (trainer clamps using EDGE_THRESHOLD_MAX).
+        "EDGE_THRESHOLD_MAX": 0.0045,
+        "EDGE_THRESHOLD": 0.0038,
+        # Tighten cost-aware edge requirement to reduce marginal buy impulses.
+        "COST_EDGE_MULT": 2.4,
+        "EDGE_SAFETY_MARGIN": 0.00035,
         "GATE_SAFETY_MARGIN": 0.00015,
 
         # Reduce flip-flopping / churn.
-        "MIN_HOLD_STEPS": 30,
-        "MIN_TRADE_GAP_STEPS": 15,
-        "HYSTERESIS_REQUIRED_STREAK": 2,
-        "HYSTERESIS_ALLOW_IF_EDGE_MULT": 2.0,
-        "TRADE_RATE_WINDOW_STEPS": 120,
-        "MAX_TRADES_PER_WINDOW": 10,
+        # 5m steps: 6 = 30m minimum hold; 4 = 20m minimum trade gap.
+        "MIN_HOLD_STEPS": 6,
+        "MIN_TRADE_GAP_STEPS": 4,
+        # Require more persistence before acting on a BUY/SELL signal.
+        "HYSTERESIS_REQUIRED_STREAK": 3,
+        "HYSTERESIS_ALLOW_IF_EDGE_MULT": 1.8,
+        "TRADE_RATE_WINDOW_STEPS": 240,
+        # Relax trade-rate limiter: fewer forced HOLDs due to trade-rate budget.
+        "MAX_TRADES_PER_WINDOW": 30,
         "TRADE_RATE_SELL_BYPASS_EDGE_MULT": 2.8,
+
+        # Cooldown: allow risk-reducing exits sooner; avoid delayed sells becoming larger losses.
+        "COOLDOWN_STRONG_EDGE_MULT": 1.6,
+        "COOLDOWN_STRONG_MIN_GAP_STEPS": 2,
 
         # Turnover discipline and adaptive budget floors suitable for 5m.
         "TURNOVER_PENALTY": 0.00010,
@@ -497,16 +509,21 @@ PROFILES = {
 
         # Loss containment overlay (mandatory for profitability attempts).
         "ENABLE_HARD_RISK_EXITS": True,
-        "STOP_LOSS_PCT": 0.010,
+        # Option A: shrink losers
+        "STOP_LOSS_PCT": 0.008,
         "TRAILING_STOP_PCT": 0.012,
-        "MAX_POSITION_HOLD_STEPS": 84,
+        "MAX_POSITION_HOLD_STEPS": 60,
 
         # Reward shaping: keep learning stable on sparse, higher-quality trades.
         "REWARD_SCALE": 55.0,
+        # Debugging: keep reward scale stable; avoid pinning at REWARD_SCALE_MAX in low-vol regimes.
+        "ADAPTIVE_REWARD_SCALE": False,
         "ADAPTIVE_REWARD_DECAY": 0.05,
         "DRAWDOWN_PENALTY": 0.60,
-        "DIRECTIONAL_SHAPING_WEIGHT": 0.04,
-        "FLAT_HOLD_MISS_PENALTY_WEIGHT": 0.03,
+        # Reduce flat-state "bribe" that can encourage marginal buys.
+        # Reduce directional shaping to curb impulsive BUY proposals
+        "DIRECTIONAL_SHAPING_WEIGHT": 0.02,
+        "FLAT_HOLD_MISS_PENALTY_WEIGHT": 0.01,
         "ENABLE_PROB_SHAPING": False,
     },
 }
