@@ -965,6 +965,34 @@ class Trainer:
                 hold_reason = hold_reason or "trade_rate"
                 budget_blocked = True
 
+        # --- discretionary sell break-even filter --------------------------------
+        # Block churny SELLs that cannot cover estimated round-trip friction unless:
+        # - we're in a forced/stuck risk exit, or
+        # - the position is sufficiently underwater (loss-cut), or
+        # - the edge is strong enough to override.
+        if (
+            action == "sell"
+            and position_before > 0
+            and (not forced_exit)
+            and (not stuck_relax)
+        ):
+            entry = float(self.portfolio.entry_price or 0.0)
+            unreal = (price_now / max(entry, 1e-9)) - 1.0 if entry > 0 else 0.0
+            underwater_exit = unreal <= -float(getattr(config, "COOLDOWN_SELL_UNDERWATER_EXIT_PCT", 0.0))
+            est_oneway = config.FEE_RATE + config.SLIPPAGE_RATE
+            est_roundtrip = (2.0 * est_oneway) + config.GATE_SAFETY_MARGIN
+            req_profit = max(
+                float(getattr(config, "MIN_PROFIT_TO_SELL_PCT", 0.0)),
+                float(getattr(config, "MIN_PROFIT_TO_SELL_MULT_OF_COST", 1.0)) * est_roundtrip,
+            )
+            strong_override = sell_margin >= (float(getattr(config, "SELL_BREAKEVEN_STRONG_EDGE_MULT", 0.0)) * cost_edge)
+            if (not underwater_exit) and (not strong_override) and unreal < req_profit:
+                action = "hold"
+                hold_reason = hold_reason or "sell_breakeven"
+                gate_blocked = True
+                self.gate_blocks += 1
+                self._gate_reason_counter["sell_breakeven"] += 1
+
         trade_executed = False
         fee_paid = 0.0
         turnover_penalty = 0.0
