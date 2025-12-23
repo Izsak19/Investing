@@ -264,8 +264,15 @@ STUCK_EDGE_THRESHOLD = 0.0
 # OFF by default to preserve baseline behaviour and keep comparisons clean.
 ENABLE_HARD_RISK_EXITS = False
 
+# Position-level risk overlays (always evaluated; override discretionary logic)
+STOP_LOSS_PCT = 0.003        # 0.3% loss from entry triggers forced exit
+TAKE_PROFIT_PCT = 0.004      # 0.4% profit can trigger a clean exit
+TRAILING_TP_PCT = 0.003      # trail profits by this fraction from peak
+USE_TRAILING_TP = True
+FORCE_FULL_EXIT_ON_RISK = True
+
 # Per-position thresholds (fractional returns vs entry).
-STOP_LOSS_PCT = 0.008          # 0.8% hard stop
+HARD_STOP_LOSS_PCT = 0.008          # 0.8% hard stop
 TRAILING_STOP_PCT = 0.006      # 0.6% trailing stop from peak
 MAX_POSITION_HOLD_STEPS = 240  # 4h on 1m candles
 

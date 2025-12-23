@@ -229,6 +229,8 @@ class Trainer:
         self._prob_beta = float(config.PROB_SHAPING_BETA0)
         # warn-once registry for percentile sanitization (data hygiene)
         self._percentile_warned: set[str] = set()
+        # per-position peak tracking for trailing take-profit
+        self._pos_peak_price: float | None = None
 
     def reset_portfolio(self) -> None:
         """Reset portfolio and tracking buffers to their initial state."""
@@ -281,6 +283,7 @@ class Trainer:
         self._prob_beta = float(config.PROB_SHAPING_BETA0)
         # warn-once registry for percentile sanitization (data hygiene)
         self._percentile_warned: set[str] = set()
+        self._pos_peak_price = None
 
     # --- helpers --------------------------------------------------------------
 
@@ -551,7 +554,7 @@ class Trainer:
                 if hold_steps >= int(getattr(config, "MAX_POSITION_HOLD_STEPS", 10**9)):
                     forced_action = "sell"
                     forced_exit_reason = "time_stop"
-                if unreal <= -float(getattr(config, "STOP_LOSS_PCT", 0.0)):
+                if unreal <= -float(getattr(config, "HARD_STOP_LOSS_PCT", 0.0)):
                     forced_action = "sell"
                     forced_exit_reason = "stop_loss"
                 # trailing stop from peak while in position
@@ -784,7 +787,7 @@ class Trainer:
         else:
             cost_edge = edge_threshold
 
-        if (not warmup_active) and (not stuck_relax):
+        if (not warmup_active) and (not stuck_relax) and (not forced_exit):
             if action == "buy" and buy_margin < cost_edge:
                 action = "hold"
                 hold_reason = "cost_gate"
@@ -965,6 +968,33 @@ class Trainer:
                 hold_reason = hold_reason or "trade_rate"
                 budget_blocked = True
 
+        # --- position-level risk exits (hard stop + take-profit / trailing TP) ---
+        entry_price = float(self.portfolio.entry_price or 0.0)
+        if position_before > 0 and entry_price > 0:
+            self._pos_peak_price = (
+                price_now if self._pos_peak_price is None else max(float(self._pos_peak_price), price_now)
+            )
+            unreal = (price_now / entry_price) - 1.0
+            stop_hit = unreal <= -float(getattr(config, "STOP_LOSS_PCT", 0.0))
+            tp_hit = unreal >= float(getattr(config, "TAKE_PROFIT_PCT", 0.0))
+            trail_hit = (
+                bool(getattr(config, "USE_TRAILING_TP", False))
+                and self._pos_peak_price is not None
+                and price_now <= float(self._pos_peak_price) * (1 - float(getattr(config, "TRAILING_TP_PCT", 0.0)))
+            )
+            if (stop_hit or tp_hit or trail_hit) and (not forced_exit):
+                forced_exit = True
+                forced_exit_reason = (
+                    "stop_loss" if stop_hit else "take_profit" if tp_hit else "trailing_tp"
+                )
+                action = "sell"
+                hold_reason = None
+                gate_blocked = False
+                timing_blocked = False
+                budget_blocked = False
+        else:
+            self._pos_peak_price = None
+
         # --- discretionary sell break-even filter --------------------------------
         # Block churny SELLs that cannot cover estimated round-trip friction unless:
         # - we're in a forced/stuck risk exit, or
@@ -1103,6 +1133,8 @@ class Trainer:
 
         elif action == "sell" and position_before > 0:
             sell_frac = self._dynamic_fraction(sell_margin) if config.PARTIAL_SELLS else 1.0
+            if forced_exit and getattr(config, "FORCE_FULL_EXIT_ON_RISK", False):
+                sell_frac = 1.0
             # If the sell signal is very strong, prefer a clean exit to avoid
             # hundreds of tiny partial sells that keep the position "alive" and block re-entries.
             if sell_margin >= (config.COOLDOWN_STRONG_EDGE_MULT * cost_edge):
@@ -1148,6 +1180,7 @@ class Trainer:
                     realized_pnl = self.portfolio.cash - self.portfolio.entry_value
                     self.portfolio.entry_price = 0.0
                     self.portfolio.entry_value = 0.0
+                    self._pos_peak_price = None
                     self.last_entry_step = -1
                     self._buy_legs_current = 0
                 else:
@@ -1404,6 +1437,8 @@ class Trainer:
             timing_blocked=timing_blocked,
             budget_blocked=budget_blocked,
             stuck_relax=stuck_relax,
+            forced_exit=forced_exit,
+            forced_exit_reason=forced_exit_reason,
         )
 
     # NOTE: run(), _flush_trades_and_metrics(), _persist_trades(), _persist_metrics(), _save_trainer_state()
