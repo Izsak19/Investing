@@ -1328,22 +1328,23 @@ class Trainer:
             if action == "buy":
                 self.buy_legs += 1
             elif action == "sell":
-                self.sell_legs += 1
+                self.sell_legs += 1  # only increment when a SELL leg actually executes
                 if forced_exit:
                     self.forced_exit_count += 1
                     if forced_exit_reason:
                         self._forced_exit_reason_counter[forced_exit_reason] += 1
-                # per-leg PnL: use entry price BEFORE the sell (especially important on full closes)
-                # We stash it during execution in entry_price_for_leg.
+                # Per-leg PnL accounting (supports partial sells):
+                # - use entry price BEFORE the sell (captured during execution)
+                # - win/loss stats are based on per-leg net PnL, not just full closes
                 entry_price_for_leg = locals().get("entry_price_for_leg", self.portfolio.entry_price)
-                leg_qty = notional_traded / max(price_now, 1e-9)
-                # entry_price_for_leg includes buy-side frictions via basis; subtract sell frictions for net leg PnL
-                leg_pnl_net = (price_now - entry_price_for_leg) * leg_qty - fee_paid - slippage_paid
+                leg_qty = float(trade_size)
+                gross_leg_pnl = leg_qty * (price_now - entry_price_for_leg)
+                leg_pnl_net = gross_leg_pnl - fee_paid - slippage_paid
                 if leg_pnl_net > 0:
                     self.winning_sell_legs += 1
                     self._win_pnl_sum += float(leg_pnl_net)
                     self._win_pnl_count += 1
-                elif leg_pnl_net < 0:
+                else:
                     self._loss_pnl_sum += float(leg_pnl_net)
                     self._loss_pnl_count += 1
 
