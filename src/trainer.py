@@ -769,6 +769,9 @@ class Trainer:
         gate_blocked = False
         timing_blocked = False
         budget_blocked = False
+        value_before = self.portfolio.value(price_now)
+        position_before = self.portfolio.position
+        cash_before = self.portfolio.cash
 
         # --- cost-aware gating -------------------------------------------------
         # In stuck mode, do not re-veto here (we already softened the threshold above).
@@ -799,6 +802,10 @@ class Trainer:
         # so the agent only sees timing-feasible actions. We keep using the computed
         # gap_ok/hold_ok here for the final enforcement step below.
 
+        unrealized_ret = 0.0
+        if position_before > 0 and self.portfolio.entry_price > 0:
+            unrealized_ret = (price_now / max(self.portfolio.entry_price, 1e-9)) - 1.0
+
         if (not warmup_active) and (not stuck_relax):
             # Cooldown gating: enforce minimum spacing between trades.
             # We allow a *very conservative* bypass only for strong, risk-reducing exits,
@@ -816,6 +823,10 @@ class Trainer:
             strong_min_gap = min(strong_min_gap, max(eff_gap, int(getattr(config, "COOLDOWN_MIN_GAP_FLOOR", 0))))
             min_gap_ok = since_last_trade >= strong_min_gap
             strong_cooldown_ok = strong_enough and bypass_allowed and min_gap_ok
+            if action == "sell" and not strong_cooldown_ok:
+                underwater_exit = unrealized_ret <= -float(getattr(config, "COOLDOWN_SELL_UNDERWATER_EXIT_PCT", 0.0))
+                if underwater_exit and since_last_trade >= gap_floor:
+                    strong_cooldown_ok = True
             if action == "buy" and (not gap_ok) and (not strong_cooldown_ok):
                 action = "hold"
                 hold_reason = hold_reason or "cooldown_gap"
@@ -962,9 +973,6 @@ class Trainer:
         notional_traded = 0.0
         trade_size = 0.0
 
-        value_before = self.portfolio.value(price_now)
-        position_before = self.portfolio.position
-        cash_before = self.portfolio.cash
         # Will be updated after execution; used for unbiased reward calculation.
         value_after = value_before
 
@@ -1667,5 +1675,3 @@ def resume_from(run_dir: Path, agent: BanditAgent, trainer: Trainer) -> None:
         trainer._reward_var_ema = float(getattr(state, 'reward_var_ema', config.REWARD_VAR_INIT))
         trainer._prob_alpha = float(getattr(state, 'prob_alpha', config.PROB_SHAPING_ALPHA0))
         trainer._prob_beta = float(getattr(state, 'prob_beta', config.PROB_SHAPING_BETA0))
-
-

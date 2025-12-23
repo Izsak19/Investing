@@ -414,7 +414,8 @@ class BanditAgent:
 
         cov_inv = np.asarray(self.state.cov_inv_matrices[a_idx], dtype=float)
         x_col = x.reshape(-1, 1)
-        denom = float(1.0 + (x_col.T @ cov_inv @ x_col))
+        quad_form = float((x_col.T @ cov_inv @ x_col).item())
+        denom = float(1.0 + quad_form)
         cov_update = (cov_inv @ x_col @ x_col.T @ cov_inv) / denom
         new_cov_inv = self._project_precision(cov_inv - cov_update)
         new_bias = np.asarray(self.state.bias_vectors[a_idx], dtype=float) + y * x
@@ -497,7 +498,8 @@ class RLSForgettingAgent(BanditAgent):
         cov_inv = np.asarray(self.state.cov_inv_matrices[a_idx], dtype=float)
         scaled_precision = cov_inv / lam
         x_col = x.reshape(-1, 1)
-        denom = float(1.0 + (x_col.T @ scaled_precision @ x_col))
+        quad_form = float((x_col.T @ scaled_precision @ x_col).item())
+        denom = float(1.0 + quad_form)
         cov_update = (scaled_precision @ x_col @ x_col.T @ scaled_precision) / denom
         new_cov_inv = self._project_precision(scaled_precision - cov_update)
 
