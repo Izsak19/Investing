@@ -106,6 +106,9 @@ ADAPTIVE_COOLDOWN_RET_EMA_DECAY = 0.05
 COOLDOWN_STRONG_EDGE_MULT = 2.5
 COOLDOWN_BYPASS_SELL_ONLY = False
 COOLDOWN_STRONG_MIN_GAP_STEPS = 5
+# Allow risk-reducing exits during cooldown when the position is modestly underwater.
+# This prevents large drawdowns caused by gated sells after a bad entry.
+COOLDOWN_SELL_UNDERWATER_EXIT_PCT = 0.002
 
 # Turnover hard block: if stressed, block new entries and allow exits only on strong edge.
 TURNOVER_HARD_BLOCK_MULT = 2.0
