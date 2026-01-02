@@ -1904,6 +1904,11 @@ class Trainer:
                     budget_blocked = True
             else:
                 pos_frac = self._dynamic_fraction(buy_margin)
+                if edge_policy_active and edge_gate_pred is not None and position_before == 0:
+                    boost = float(getattr(config, "EDGE_POLICY_POSITION_BOOST", 0.0))
+                    if boost > 0.0:
+                        edge_strength = min(1.0, abs(float(edge_gate_pred)))
+                        pos_frac = min(config.POSITION_FRACTION_MAX, pos_frac * (1.0 + boost * edge_strength))
                 if getattr(config, "ENABLE_ATR_POSITION_SIZING", False):
                     try:
                         atr_col = getattr(config, "ATR_COL", "atr_14")
@@ -2039,6 +2044,11 @@ class Trainer:
             elif position_before == 0 and bool(getattr(config, "ENABLE_SHORTS", False)) and cash_before > 0:
                 # Open short position.
                 pos_frac = self._dynamic_fraction(sell_margin)
+                if edge_policy_active and edge_gate_pred is not None:
+                    boost = float(getattr(config, "EDGE_POLICY_POSITION_BOOST", 0.0))
+                    if boost > 0.0:
+                        edge_strength = min(1.0, abs(float(edge_gate_pred)))
+                        pos_frac = min(config.POSITION_FRACTION_MAX, pos_frac * (1.0 + boost * edge_strength))
                 if getattr(config, "ENABLE_ATR_POSITION_SIZING", False):
                     try:
                         atr_col = getattr(config, "ATR_COL", "atr_14")
