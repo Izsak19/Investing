@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# IDE
+.idea/
+
+# Runtime artifacts
+data/runs/
+data/state.json
+
+# Virtual env
+.venv/

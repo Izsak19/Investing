@@ -115,6 +115,8 @@ COOLDOWN_SELL_UNDERWATER_EXIT_PCT = 0.002
 MIN_PROFIT_TO_SELL_PCT = 0.0
 MIN_PROFIT_TO_SELL_MULT_OF_COST = 1.0
 SELL_BREAKEVEN_STRONG_EDGE_MULT = 2.0
+# Optional: allow breakeven sell bypass after holding this many steps (0 disables).
+SELL_BREAKEVEN_MAX_HOLD_STEPS = 0
 
 # Turnover hard block: if stressed, block new entries and allow exits only on strong edge.
 TURNOVER_HARD_BLOCK_MULT = 2.0
@@ -192,6 +194,8 @@ TURNOVER_BUDGET_MIN = 5.0
 TURNOVER_BUDGET_MAX = 20.0
 TURNOVER_BUDGET_WINDOW = 500
 TURNOVER_BUDGET_PENALTY = 0.18
+# Allow strong-edge BUYs to bypass turnover hard-blocking (0 disables).
+TURNOVER_BUY_BYPASS_EDGE_MULT = 0.0
 RETURN_HISTORY_WINDOW = 200
 
 # ----------------------------------------------------------------------------
@@ -256,6 +260,14 @@ STUCK_HOLD_WINDOW = 800
 STUCK_HOLD_RATIO = 0.92
 STUCK_POSTERIOR_BOOST = 0.20
 STUCK_EDGE_THRESHOLD = 0.0
+STUCK_ALLOW_BUY = False
+STOP_LOSS_COOLDOWN_STEPS = 0
+# Flat-position unfreeze: avoid zero-trade regimes by gently relaxing entry filters
+# after a long no-trade stretch while remaining cost-gated.
+ENABLE_FLAT_UNFREEZE = True
+FLAT_UNFREEZE_STEPS = 600
+FLAT_POSTERIOR_BOOST = 0.08
+FLAT_RELAX_ENTRY_FILTERS = True
 
 # ----------------------------------------------------------------------------
 # Hard risk exits (optional; evaluated independently of gating)
@@ -270,11 +282,23 @@ TAKE_PROFIT_PCT = 0.004      # 0.4% profit can trigger a clean exit
 TRAILING_TP_PCT = 0.003      # trail profits by this fraction from peak
 USE_TRAILING_TP = True
 FORCE_FULL_EXIT_ON_RISK = True
+USE_ATR_EXITS = False
+ATR_PERIOD = 14
+ATR_STOP_MULT = 1.2
+ATR_TP_MULT = 1.8
+ATR_COL = "atr_14"
 
 # Per-position thresholds (fractional returns vs entry).
 HARD_STOP_LOSS_PCT = 0.008          # 0.8% hard stop
 TRAILING_STOP_PCT = 0.006      # 0.6% trailing stop from peak
 MAX_POSITION_HOLD_STEPS = 240  # 4h on 1m candles
+
+# Trend-based early exit: if trend turns against the position, exit sooner.
+ENABLE_TREND_EXIT = False
+TREND_EXIT_COL = "trend_48"
+TREND_EXIT_LONG_MAX = -0.002
+TREND_EXIT_SHORT_MIN = 0.002
+TREND_EXIT_STREAK = 2
 
 # Position sizing (dynamic) – smaller sizing for 1m.
 POSITION_FRACTION_MIN = 0.02
@@ -300,6 +324,96 @@ REGIME_EDGE_LOW_PCT = 0.30
 REGIME_EDGE_HIGH_PCT = 0.70
 REGIME_EDGE_TIGHTEN_MULT = 1.6
 REGIME_EDGE_RELAX_MULT = 0.6
+
+# Entry filter: avoid BUYs in very low-vol regimes (optional).
+ENABLE_ENTRY_VOL_FILTER = False
+ENTRY_VOL_COL = REGIME_EDGE_VOL_COL
+ENTRY_VOL_PCT_MIN = 0.30
+ENABLE_BASIS_ENTRY_FILTER = False
+BASIS_ENTRY_MIN = 0.0
+ENABLE_TREND_ENTRY_FILTER = False
+TREND_ENTRY_COL = "trend_48"
+TREND_ENTRY_MIN = 0.0
+ENABLE_LONGS = True
+ENABLE_SHORTS = False
+ENABLE_SHORT_TREND_FILTER = False
+SHORT_TREND_ENTRY_COL = "trend_48"
+SHORT_TREND_ENTRY_MAX = 0.0
+ENABLE_FLOW_ENTRY_FILTER = False
+FLOW_ENTRY_COL = "aggr_imb"
+FLOW_ENTRY_LONG_MIN = 0.0
+ENABLE_FLOW_SHORT_FILTER = False
+FLOW_ENTRY_SHORT_MAX = 0.0
+ENABLE_STRONG_TREND_GATE = False
+STRONG_TREND_COL = "trend_48"
+STRONG_TREND_MIN_ABS = 0.0
+STRONG_TREND_VOL_COL = "rv1m_pct_5m"
+STRONG_TREND_VOL_MIN = 0.0
+ENABLE_CORE_SCALP = False
+CORE_TREND_COL = "trend_1000"
+CORE_TREND_LONG_MIN = 0.0
+CORE_TREND_SHORT_MAX = 0.0
+CORE_EXIT_ON_NEUTRAL = False
+CORE_POSITION_FRACTION = 0.15
+SCALP_EXTRA_FRACTION = 0.05
+SCALP_MAX_LEGS = 4
+SCALP_EMA_WINDOW = 20
+SCALP_BAND_PCT = 0.002
+SCALP_MIN_GAP_STEPS = 6
+ENABLE_EDGE_GATE = False
+EDGE_GATE_MODEL = "ridge"  # ridge or logistic
+EDGE_GATE_COST_MULT = 1.5
+EDGE_GATE_MIN_EDGE = 0.0005
+EDGE_GATE_WARMUP_STEPS = 500
+EDGE_GATE_DECAY = 0.995
+EDGE_GATE_RIDGE = 1.0
+EDGE_GATE_LR = 0.02
+EDGE_GATE_L2 = 1e-3
+EDGE_GATE_TARGET_CLIP = 0.02
+EDGE_GATE_TARGET_HORIZON = 1
+EDGE_GATE_TARGET_MIN_ABS = 0.0
+EDGE_GATE_SIGN_ONLY = False
+ENABLE_EDGE_POLICY = False
+EDGE_POLICY_MIN_EDGE = 0.0004
+EDGE_POLICY_SIGN_ONLY = False
+ENABLE_REGIME_SWITCH = False
+REGIME_TREND_COL = "trend_48"
+REGIME_TREND_LONG_MIN = 0.0
+REGIME_TREND_SHORT_MAX = 0.0
+REGIME_VOL_COL = "rv1m_pct_5m"
+REGIME_VOL_MIN = 0.0
+REGIME_EXIT_ON_FLIP = False
+REGIME_EXIT_STREAK = 2
+ENABLE_MACRO_BIAS = False
+MACRO_TREND_COL = "trend_240"
+MACRO_TREND_LONG_MIN = 0.0
+MACRO_TREND_SHORT_MAX = 0.0
+MACRO_VOL_COL = "rv1m_pct_5m"
+MACRO_VOL_MIN = 0.0
+MACRO_BIAS_FORCE_ENTRY = False
+MACRO_BIAS_FORCE_ENTRY_STEPS = 0
+MACRO_BIAS_EXIT_ON_NEUTRAL = False
+MACRO_BIAS_EXIT_ON_FLIP = False
+MACRO_BIAS_HOLD_MIN_STEPS = 0
+MACRO_BIAS_HOLD_TO_FLIP = False
+MACRO_BIAS_DIR_STREAK = 1
+ENABLE_MACRO_LOCK = False
+MACRO_LOCK_TREND_COL = "trend_1000"
+MACRO_LOCK_LONG_MIN = 0.0
+MACRO_LOCK_SHORT_MAX = 0.0
+MACRO_LOCK_VOL_COL = "rv1m_pct_5m"
+MACRO_LOCK_VOL_MIN = 0.0
+MACRO_LOCK_FORCE_ENTRY = False
+MACRO_LOCK_FORCE_ENTRY_STEPS = 0
+MACRO_LOCK_EXIT_ON_NEUTRAL = False
+MACRO_LOCK_EXIT_ON_FLIP = False
+MACRO_LOCK_HOLD_MIN_STEPS = 0
+MACRO_LOCK_HOLD_TO_FLIP = False
+MACRO_LOCK_DIR_STREAK = 1
+ENABLE_ATR_ENTRY_GATE = False
+ATR_ENTRY_MULT = 1.2
+ENABLE_ATR_POSITION_SIZING = False
+ATR_TARGET_RISK_PCT = 0.0015
 
 # Action hysteresis
 
@@ -491,12 +605,14 @@ PROFILES = {
         # Tuned to reduce marginal entries that can't beat friction while still allowing
         # enough trades to learn / validate on 5m.
         # Raise edge requirement to reduce BUY proposals (trainer clamps using EDGE_THRESHOLD_MAX).
-        "EDGE_THRESHOLD_MAX": 0.0045,
-        "EDGE_THRESHOLD": 0.0038,
-        # Tighten cost-aware edge requirement to reduce marginal buy impulses.
-        "COST_EDGE_MULT": 2.4,
-        "EDGE_SAFETY_MARGIN": 0.00035,
+        "EDGE_THRESHOLD_MAX": 0.05,
+        "EDGE_THRESHOLD": 0.02,
+        # Keep a friction-aware gate, but loosen enough to avoid near-zero entries.
+        "COST_EDGE_MULT": 1.9,
+        "EDGE_SAFETY_MARGIN": 0.00025,
         "GATE_SAFETY_MARGIN": 0.00015,
+        # Prevent tanh edge saturation so cost gating can actually work.
+        "MARGIN_SCALE_MULT": 20.0,
 
         # Reduce flip-flopping / churn.
         # 5m steps: 6 = 30m minimum hold; 4 = 20m minimum trade gap.
@@ -509,6 +625,7 @@ PROFILES = {
         # Relax trade-rate limiter: fewer forced HOLDs due to trade-rate budget.
         "MAX_TRADES_PER_WINDOW": 30,
         "TRADE_RATE_SELL_BYPASS_EDGE_MULT": 2.8,
+
 
         # Cooldown: allow risk-reducing exits sooner; avoid delayed sells becoming larger losses.
         "COOLDOWN_STRONG_EDGE_MULT": 1.6,
@@ -526,9 +643,19 @@ PROFILES = {
         # Loss containment overlay (mandatory for profitability attempts).
         "ENABLE_HARD_RISK_EXITS": True,
         # Option A: shrink losers
-        "STOP_LOSS_PCT": 0.008,
+        "STOP_LOSS_PCT": 0.006,
+        # Exit spacing: widen profit-taking to reduce churn on 5m.
+        "TAKE_PROFIT_PCT": 0.008,
+        "TRAILING_TP_PCT": 0.006,
+        "USE_TRAILING_TP": True,
+        "FORCE_FULL_EXIT_ON_RISK": True,
+        "USE_ATR_EXITS": True,
+        "ATR_STOP_MULT": 2.5,
+        "ATR_TP_MULT": 4.0,
+        "TRAILING_TP_PCT": 0.006,
         "TRAILING_STOP_PCT": 0.012,
-        "MAX_POSITION_HOLD_STEPS": 60,
+        "MAX_POSITION_HOLD_STEPS": 240,
+        "SELL_BREAKEVEN_MAX_HOLD_STEPS": 36,
 
         # Reward shaping: keep learning stable on sparse, higher-quality trades.
         "REWARD_SCALE": 55.0,
@@ -541,6 +668,941 @@ PROFILES = {
         "DIRECTIONAL_SHAPING_WEIGHT": 0.02,
         "FLAT_HOLD_MISS_PENALTY_WEIGHT": 0.01,
         "ENABLE_PROB_SHAPING": False,
+        "ENABLE_ENTRY_VOL_FILTER": False,
+        "ENABLE_BASIS_ENTRY_FILTER": False,
+        "ENABLE_TREND_ENTRY_FILTER": True,
+        "TREND_ENTRY_COL": "trend_48",
+        "TREND_ENTRY_MIN": 0.015,
+        "ENABLE_LONGS": True,
+        "ENABLE_SHORTS": True,
+        "ENABLE_SHORT_TREND_FILTER": True,
+        "SHORT_TREND_ENTRY_COL": "trend_48",
+        "SHORT_TREND_ENTRY_MAX": -0.0075,
+        "ENABLE_STRONG_TREND_GATE": False,
+        "ENABLE_REGIME_SWITCH": True,
+        "REGIME_TREND_COL": "trend_48",
+        "REGIME_TREND_LONG_MIN": 0.012,
+        "REGIME_TREND_SHORT_MAX": -0.012,
+        "REGIME_VOL_COL": "rv1m_pct_5m",
+        "REGIME_VOL_MIN": 0.35,
+        "REGIME_EXIT_ON_FLIP": True,
+        "REGIME_EXIT_STREAK": 2,
+        "ENABLE_FLAT_UNFREEZE": True,
+        "FLAT_UNFREEZE_STEPS": 120,
+        "FLAT_POSTERIOR_BOOST": 0.12,
+        "FLAT_RELAX_ENTRY_FILTERS": False,
+        "STOP_LOSS_COOLDOWN_STEPS": 12,
+    },
+    # 5m risk-freedom preset: wider stops/targets and fewer entry throttles
+    # to observe more "realistic" trade behavior under higher risk tolerance.
+    "tf_5m_risk_freedom": {
+        "WARMUP_TRADES_BEFORE_GATING": 0,
+        "POSTERIOR_SCALE": 0.08,
+        "POSTERIOR_DECAY_HALF_LIFE_STEPS": 6_000,
+        "POSTERIOR_SCALE_MIN": 0.01,
+        "FORGETTING_FACTOR": 0.996,
+
+        "EDGE_THRESHOLD_MAX": 0.05,
+        "EDGE_THRESHOLD": 0.008,
+        "COST_EDGE_MULT": 1.2,
+        "EDGE_SAFETY_MARGIN": 0.00015,
+        "GATE_SAFETY_MARGIN": 0.00010,
+        "MARGIN_SCALE_MULT": 16.0,
+
+        "MIN_HOLD_STEPS": 2,
+        "MIN_TRADE_GAP_STEPS": 2,
+        "HYSTERESIS_REQUIRED_STREAK": 2,
+        "HYSTERESIS_ALLOW_IF_EDGE_MULT": 1.4,
+        "TRADE_RATE_WINDOW_STEPS": 240,
+        "MAX_TRADES_PER_WINDOW": 60,
+        "TRADE_RATE_SELL_BYPASS_EDGE_MULT": 2.0,
+
+        "TURNOVER_PENALTY": 0.00005,
+        "TURNOVER_BUDGET_MULTIPLIER": 2.0,
+        "TURNOVER_BUDGET_MIN": 1.0,
+        "TURNOVER_BUDGET_PENALTY": 0.20,
+
+        "PARTIAL_SELLS": False,
+        "ENABLE_HARD_RISK_EXITS": True,
+        "STOP_LOSS_PCT": 0.05,
+        "TAKE_PROFIT_PCT": 0.10,
+        "USE_TRAILING_TP": False,
+        "FORCE_FULL_EXIT_ON_RISK": True,
+        "USE_ATR_EXITS": False,
+        "TRAILING_STOP_PCT": 0.06,
+        "MAX_POSITION_HOLD_STEPS": 720,
+
+        "ENABLE_TREND_EXIT": True,
+        "TREND_EXIT_COL": "trend_48",
+        "TREND_EXIT_LONG_MAX": -0.002,
+        "TREND_EXIT_SHORT_MIN": 0.002,
+        "TREND_EXIT_STREAK": 2,
+
+        "POSITION_FRACTION_MIN": 0.05,
+        "POSITION_FRACTION_MAX": 0.25,
+
+        "ENABLE_ENTRY_VOL_FILTER": False,
+        "ENABLE_BASIS_ENTRY_FILTER": False,
+        "ENABLE_TREND_ENTRY_FILTER": True,
+        "TREND_ENTRY_COL": "trend_48",
+        "TREND_ENTRY_MIN": 0.008,
+        "ENABLE_LONGS": True,
+        "ENABLE_SHORTS": True,
+        "ENABLE_SHORT_TREND_FILTER": True,
+        "SHORT_TREND_ENTRY_COL": "trend_48",
+        "SHORT_TREND_ENTRY_MAX": -0.008,
+
+        "ENABLE_STRONG_TREND_GATE": False,
+        "ENABLE_REGIME_SWITCH": False,
+        "ENABLE_FLAT_UNFREEZE": True,
+        "FLAT_UNFREEZE_STEPS": 60,
+        "FLAT_POSTERIOR_BOOST": 0.10,
+        "FLAT_RELAX_ENTRY_FILTERS": True,
+        "STOP_LOSS_COOLDOWN_STEPS": 0,
+    },
+    # 5m macro-bias preset: hold a directional position based on long-horizon trend.
+    "tf_5m_macro_bias": {
+        "WARMUP_TRADES_BEFORE_GATING": 0,
+        "POSTERIOR_SCALE": 0.05,
+        "POSTERIOR_DECAY_HALF_LIFE_STEPS": 8_000,
+        "POSTERIOR_SCALE_MIN": 0.008,
+        "FORGETTING_FACTOR": 0.997,
+
+        "EDGE_THRESHOLD_MAX": 0.05,
+        "EDGE_THRESHOLD": 0.004,
+        "COST_EDGE_MULT": 1.1,
+        "EDGE_SAFETY_MARGIN": 0.00010,
+        "GATE_SAFETY_MARGIN": 0.00010,
+        "MARGIN_SCALE_MULT": 14.0,
+
+        "MIN_HOLD_STEPS": 12,
+        "MIN_TRADE_GAP_STEPS": 6,
+        "HYSTERESIS_REQUIRED_STREAK": 2,
+        "HYSTERESIS_ALLOW_IF_EDGE_MULT": 1.4,
+        "TRADE_RATE_WINDOW_STEPS": 240,
+        "MAX_TRADES_PER_WINDOW": 12,
+        "TRADE_RATE_SELL_BYPASS_EDGE_MULT": 2.0,
+
+        "TURNOVER_PENALTY": 0.00005,
+        "TURNOVER_BUDGET_MULTIPLIER": 2.0,
+        "TURNOVER_BUDGET_MIN": 1.0,
+        "TURNOVER_BUDGET_PENALTY": 0.20,
+
+        "PARTIAL_SELLS": False,
+        "ENABLE_HARD_RISK_EXITS": True,
+        "STOP_LOSS_PCT": 0.15,
+        "TAKE_PROFIT_PCT": 0.25,
+        "USE_TRAILING_TP": False,
+        "FORCE_FULL_EXIT_ON_RISK": True,
+        "USE_ATR_EXITS": False,
+        "TRAILING_STOP_PCT": 0.08,
+        "MAX_POSITION_HOLD_STEPS": 5000,
+
+        "ENABLE_TREND_EXIT": False,
+        "TREND_EXIT_COL": "trend_48",
+        "TREND_EXIT_LONG_MAX": -0.003,
+        "TREND_EXIT_SHORT_MIN": 0.003,
+        "TREND_EXIT_STREAK": 3,
+
+        "POSITION_FRACTION_MIN": 0.10,
+        "POSITION_FRACTION_MAX": 0.30,
+
+        "ENABLE_ENTRY_VOL_FILTER": False,
+        "ENABLE_BASIS_ENTRY_FILTER": False,
+        "ENABLE_TREND_ENTRY_FILTER": False,
+        "ENABLE_LONGS": True,
+        "ENABLE_SHORTS": True,
+        "ENABLE_SHORT_TREND_FILTER": False,
+
+        "ENABLE_STRONG_TREND_GATE": False,
+        "ENABLE_REGIME_SWITCH": False,
+        "ENABLE_MACRO_BIAS": True,
+        "MACRO_TREND_COL": "trend_240",
+        "MACRO_TREND_LONG_MIN": 0.002,
+        "MACRO_TREND_SHORT_MAX": -0.002,
+        "MACRO_VOL_COL": "rv1m_pct_5m",
+        "MACRO_VOL_MIN": 0.0,
+        "MACRO_BIAS_FORCE_ENTRY": True,
+        "MACRO_BIAS_FORCE_ENTRY_STEPS": 0,
+        "MACRO_BIAS_EXIT_ON_NEUTRAL": False,
+        "MACRO_BIAS_EXIT_ON_FLIP": True,
+        "MACRO_BIAS_HOLD_MIN_STEPS": 12,
+        "MACRO_BIAS_HOLD_TO_FLIP": True,
+        "MACRO_BIAS_DIR_STREAK": 48,
+
+        "ENABLE_FLAT_UNFREEZE": True,
+        "FLAT_UNFREEZE_STEPS": 120,
+        "FLAT_POSTERIOR_BOOST": 0.08,
+        "FLAT_RELAX_ENTRY_FILTERS": True,
+        "STOP_LOSS_COOLDOWN_STEPS": 0,
+    },
+    # 5m macro-lock preset: force exposure in long-horizon trend direction and hold to flip.
+    "tf_5m_macro_lock": {
+        "WARMUP_TRADES_BEFORE_GATING": 0,
+        "POSTERIOR_SCALE": 0.05,
+        "POSTERIOR_DECAY_HALF_LIFE_STEPS": 8_000,
+        "POSTERIOR_SCALE_MIN": 0.008,
+        "FORGETTING_FACTOR": 0.998,
+
+        "EDGE_THRESHOLD_MAX": 0.05,
+        "EDGE_THRESHOLD": 0.003,
+        "COST_EDGE_MULT": 1.0,
+        "EDGE_SAFETY_MARGIN": 0.00010,
+        "GATE_SAFETY_MARGIN": 0.00010,
+        "MARGIN_SCALE_MULT": 14.0,
+
+        "MIN_HOLD_STEPS": 12,
+        "MIN_TRADE_GAP_STEPS": 6,
+        "HYSTERESIS_REQUIRED_STREAK": 2,
+        "HYSTERESIS_ALLOW_IF_EDGE_MULT": 1.4,
+        "TRADE_RATE_WINDOW_STEPS": 240,
+        "MAX_TRADES_PER_WINDOW": 6,
+        "TRADE_RATE_SELL_BYPASS_EDGE_MULT": 2.0,
+
+        "TURNOVER_PENALTY": 0.00005,
+        "TURNOVER_BUDGET_MULTIPLIER": 5.0,
+        "TURNOVER_BUDGET_MIN": 2.0,
+        "TURNOVER_BUDGET_PENALTY": 0.18,
+
+        "PARTIAL_SELLS": False,
+        "ENABLE_HARD_RISK_EXITS": False,
+        "STOP_LOSS_PCT": 0.12,
+        "TAKE_PROFIT_PCT": 0.25,
+        "USE_TRAILING_TP": False,
+        "FORCE_FULL_EXIT_ON_RISK": True,
+        "USE_ATR_EXITS": False,
+        "TRAILING_STOP_PCT": 0.08,
+        "MAX_POSITION_HOLD_STEPS": 9000,
+
+        "ENABLE_TREND_EXIT": False,
+        "POSITION_FRACTION_MIN": 0.15,
+        "POSITION_FRACTION_MAX": 0.35,
+
+        "ENABLE_ENTRY_VOL_FILTER": False,
+        "ENABLE_BASIS_ENTRY_FILTER": False,
+        "ENABLE_TREND_ENTRY_FILTER": False,
+        "ENABLE_LONGS": True,
+        "ENABLE_SHORTS": True,
+        "ENABLE_SHORT_TREND_FILTER": False,
+
+        "ENABLE_STRONG_TREND_GATE": False,
+        "ENABLE_REGIME_SWITCH": False,
+        "ENABLE_MACRO_BIAS": False,
+        "ENABLE_MACRO_LOCK": True,
+        "MACRO_LOCK_TREND_COL": "trend_1000",
+        "MACRO_LOCK_LONG_MIN": 0.0025,
+        "MACRO_LOCK_SHORT_MAX": -0.0025,
+        "MACRO_LOCK_VOL_COL": "rv1m_pct_5m",
+        "MACRO_LOCK_VOL_MIN": 0.0,
+        "MACRO_LOCK_FORCE_ENTRY": True,
+        "MACRO_LOCK_FORCE_ENTRY_STEPS": 0,
+        "MACRO_LOCK_EXIT_ON_NEUTRAL": False,
+        "MACRO_LOCK_EXIT_ON_FLIP": True,
+        "MACRO_LOCK_HOLD_MIN_STEPS": 18,
+        "MACRO_LOCK_HOLD_TO_FLIP": True,
+        "MACRO_LOCK_DIR_STREAK": 12,
+
+        "ENABLE_FLAT_UNFREEZE": False,
+        "STOP_LOSS_COOLDOWN_STEPS": 0,
+    },
+    # 5m macro-lock short-only preset: force a persistent short when macro trend is available.
+    "tf_5m_macro_lock_short": {
+        "WARMUP_TRADES_BEFORE_GATING": 0,
+        "POSTERIOR_SCALE": 0.02,
+        "POSTERIOR_DECAY_HALF_LIFE_STEPS": 10_000,
+        "POSTERIOR_SCALE_MIN": 0.005,
+        "FORGETTING_FACTOR": 0.999,
+
+        "EDGE_THRESHOLD_MAX": 0.05,
+        "EDGE_THRESHOLD": 0.003,
+        "COST_EDGE_MULT": 1.0,
+        "EDGE_SAFETY_MARGIN": 0.00010,
+        "GATE_SAFETY_MARGIN": 0.00010,
+        "MARGIN_SCALE_MULT": 14.0,
+
+        "MIN_HOLD_STEPS": 12,
+        "MIN_TRADE_GAP_STEPS": 6,
+        "HYSTERESIS_REQUIRED_STREAK": 2,
+        "HYSTERESIS_ALLOW_IF_EDGE_MULT": 1.4,
+        "TRADE_RATE_WINDOW_STEPS": 240,
+        "MAX_TRADES_PER_WINDOW": 30,
+        "TRADE_RATE_SELL_BYPASS_EDGE_MULT": 2.0,
+
+        "TURNOVER_PENALTY": 0.00005,
+        "TURNOVER_BUDGET_MULTIPLIER": 5.0,
+        "TURNOVER_BUDGET_MIN": 2.0,
+        "TURNOVER_BUDGET_PENALTY": 0.18,
+
+        "PARTIAL_SELLS": False,
+        "ENABLE_HARD_RISK_EXITS": True,
+        "HARD_STOP_LOSS_PCT": 0.03,
+        "STOP_LOSS_PCT": 0.015,
+        "TAKE_PROFIT_PCT": 0.025,
+        "USE_TRAILING_TP": False,
+        "FORCE_FULL_EXIT_ON_RISK": True,
+        "USE_ATR_EXITS": False,
+        "TRAILING_STOP_PCT": 0.02,
+        "MAX_POSITION_HOLD_STEPS": 9000,
+
+        "ENABLE_TREND_EXIT": True,
+        "TREND_EXIT_COL": "trend_48",
+        "TREND_EXIT_SHORT_MIN": 0.002,
+        "POSITION_FRACTION_MIN": 0.20,
+        "POSITION_FRACTION_MAX": 0.40,
+
+        "ENABLE_ENTRY_VOL_FILTER": False,
+        "ENABLE_BASIS_ENTRY_FILTER": False,
+        "ENABLE_TREND_ENTRY_FILTER": False,
+        "ENABLE_LONGS": False,
+        "ENABLE_SHORTS": True,
+        "ENABLE_SHORT_TREND_FILTER": True,
+        "SHORT_TREND_ENTRY_COL": "trend_48",
+        "SHORT_TREND_ENTRY_MAX": -0.003,
+
+        "ENABLE_STRONG_TREND_GATE": False,
+        "ENABLE_REGIME_SWITCH": False,
+        "ENABLE_MACRO_BIAS": False,
+        "ENABLE_MACRO_LOCK": True,
+        "MACRO_LOCK_TREND_COL": "trend_1000",
+        "MACRO_LOCK_LONG_MIN": 999.0,
+        "MACRO_LOCK_SHORT_MAX": 1.0,
+        "MACRO_LOCK_VOL_COL": "rv1m_pct_5m",
+        "MACRO_LOCK_VOL_MIN": 0.0,
+        "MACRO_LOCK_FORCE_ENTRY": True,
+        "MACRO_LOCK_FORCE_ENTRY_STEPS": 0,
+        "MACRO_LOCK_EXIT_ON_NEUTRAL": False,
+        "MACRO_LOCK_EXIT_ON_FLIP": False,
+        "MACRO_LOCK_HOLD_MIN_STEPS": 12,
+        "MACRO_LOCK_HOLD_TO_FLIP": False,
+        "MACRO_LOCK_DIR_STREAK": 1,
+
+        "ENABLE_FLAT_UNFREEZE": False,
+        "STOP_LOSS_COOLDOWN_STEPS": 0,
+        "ENABLE_KILL_SWITCH": False,
+    },
+    # 5m regime + micro-entry preset: trade only when long-horizon trend agrees.
+    "tf_5m_regime_micro": {
+        "WARMUP_TRADES_BEFORE_GATING": 0,
+        "POSTERIOR_SCALE": 0.08,
+        "POSTERIOR_DECAY_HALF_LIFE_STEPS": 8_000,
+        "POSTERIOR_SCALE_MIN": 0.02,
+        "FORGETTING_FACTOR": 0.996,
+
+        "EDGE_THRESHOLD_MAX": 0.05,
+        "EDGE_THRESHOLD": 0.003,
+        "COST_EDGE_MULT": 1.2,
+        "EDGE_SAFETY_MARGIN": 0.00010,
+        "GATE_SAFETY_MARGIN": 0.00010,
+        "MARGIN_SCALE_MULT": 12.0,
+
+        "MIN_HOLD_STEPS": 6,
+        "MIN_TRADE_GAP_STEPS": 6,
+        "HYSTERESIS_REQUIRED_STREAK": 2,
+        "HYSTERESIS_ALLOW_IF_EDGE_MULT": 1.5,
+        "TRADE_RATE_WINDOW_STEPS": 1000,
+        "MAX_TRADES_PER_WINDOW": 30,
+        "TRADE_RATE_SELL_BYPASS_EDGE_MULT": 2.0,
+
+        "TURNOVER_PENALTY": 0.00005,
+        "TURNOVER_BUDGET_MULTIPLIER": 4.0,
+        "TURNOVER_BUDGET_MIN": 2.0,
+        "TURNOVER_BUDGET_PENALTY": 0.18,
+
+        "PARTIAL_SELLS": False,
+        "ENABLE_HARD_RISK_EXITS": True,
+        "HARD_STOP_LOSS_PCT": 0.04,
+        "STOP_LOSS_PCT": 0.012,
+        "TAKE_PROFIT_PCT": 0.02,
+        "USE_TRAILING_TP": False,
+        "FORCE_FULL_EXIT_ON_RISK": True,
+        "USE_ATR_EXITS": False,
+        "TRAILING_STOP_PCT": 0.03,
+        "MAX_POSITION_HOLD_STEPS": 48,
+
+        "ENABLE_TREND_EXIT": True,
+        "TREND_EXIT_COL": "trend_48",
+        "TREND_EXIT_LONG_MAX": -0.001,
+        "TREND_EXIT_SHORT_MIN": 0.001,
+        "TREND_EXIT_STREAK": 2,
+
+        "POSITION_FRACTION_MIN": 0.10,
+        "POSITION_FRACTION_MAX": 0.30,
+
+        "ENABLE_ENTRY_VOL_FILTER": True,
+        "ENTRY_VOL_COL": "rv1m_pct_5m",
+        "ENTRY_VOL_PCT_MIN": 0.45,
+        "ENABLE_BASIS_ENTRY_FILTER": False,
+        "ENABLE_TREND_ENTRY_FILTER": True,
+        "TREND_ENTRY_COL": "trend_48",
+        "TREND_ENTRY_MIN": 0.0035,
+        "ENABLE_LONGS": True,
+        "ENABLE_SHORTS": True,
+        "ENABLE_SHORT_TREND_FILTER": True,
+        "SHORT_TREND_ENTRY_COL": "trend_48",
+        "SHORT_TREND_ENTRY_MAX": -0.0035,
+
+        "ENABLE_STRONG_TREND_GATE": False,
+        "ENABLE_REGIME_SWITCH": True,
+        "REGIME_TREND_COL": "trend_1000",
+        "REGIME_TREND_LONG_MIN": 0.003,
+        "REGIME_TREND_SHORT_MAX": -0.003,
+        "REGIME_VOL_COL": "rv1m_pct_5m",
+        "REGIME_VOL_MIN": 0.30,
+        "REGIME_EXIT_ON_FLIP": True,
+        "REGIME_EXIT_STREAK": 2,
+
+        "ENABLE_MACRO_BIAS": False,
+        "ENABLE_MACRO_LOCK": False,
+        "ENABLE_FLAT_UNFREEZE": False,
+        "STOP_LOSS_COOLDOWN_STEPS": 0,
+        "ENABLE_KILL_SWITCH": False,
+    },
+    # 5m regime + ATR exits: let winners run, cut losers by volatility.
+    "tf_5m_regime_atr": {
+        "WARMUP_TRADES_BEFORE_GATING": 0,
+        "POSTERIOR_SCALE": 0.08,
+        "POSTERIOR_DECAY_HALF_LIFE_STEPS": 8_000,
+        "POSTERIOR_SCALE_MIN": 0.02,
+        "FORGETTING_FACTOR": 0.996,
+
+        "EDGE_THRESHOLD_MAX": 0.05,
+        "EDGE_THRESHOLD": 0.003,
+        "COST_EDGE_MULT": 1.2,
+        "EDGE_SAFETY_MARGIN": 0.00010,
+        "GATE_SAFETY_MARGIN": 0.00010,
+        "MARGIN_SCALE_MULT": 12.0,
+
+        "MIN_HOLD_STEPS": 6,
+        "MIN_TRADE_GAP_STEPS": 6,
+        "HYSTERESIS_REQUIRED_STREAK": 2,
+        "HYSTERESIS_ALLOW_IF_EDGE_MULT": 1.5,
+        "TRADE_RATE_WINDOW_STEPS": 1000,
+        "MAX_TRADES_PER_WINDOW": 30,
+        "TRADE_RATE_SELL_BYPASS_EDGE_MULT": 2.0,
+
+        "TURNOVER_PENALTY": 0.00005,
+        "TURNOVER_BUDGET_MULTIPLIER": 4.0,
+        "TURNOVER_BUDGET_MIN": 2.0,
+        "TURNOVER_BUDGET_PENALTY": 0.18,
+
+        "PARTIAL_SELLS": False,
+        "ENABLE_HARD_RISK_EXITS": True,
+        "HARD_STOP_LOSS_PCT": 0.06,
+        "STOP_LOSS_PCT": 0.012,
+        "TAKE_PROFIT_PCT": 0.02,
+        "USE_TRAILING_TP": False,
+        "FORCE_FULL_EXIT_ON_RISK": True,
+        "USE_ATR_EXITS": True,
+        "ATR_STOP_MULT": 2.2,
+        "ATR_TP_MULT": 3.6,
+        "TRAILING_STOP_PCT": 0.03,
+        "MAX_POSITION_HOLD_STEPS": 48,
+
+        "ENABLE_TREND_EXIT": True,
+        "TREND_EXIT_COL": "trend_48",
+        "TREND_EXIT_LONG_MAX": -0.001,
+        "TREND_EXIT_SHORT_MIN": 0.001,
+        "TREND_EXIT_STREAK": 2,
+
+        "POSITION_FRACTION_MIN": 0.10,
+        "POSITION_FRACTION_MAX": 0.30,
+
+        "ENABLE_ENTRY_VOL_FILTER": True,
+        "ENTRY_VOL_COL": "rv1m_pct_5m",
+        "ENTRY_VOL_PCT_MIN": 0.40,
+        "ENABLE_BASIS_ENTRY_FILTER": False,
+        "ENABLE_TREND_ENTRY_FILTER": True,
+        "TREND_ENTRY_COL": "trend_48",
+        "TREND_ENTRY_MIN": 0.0025,
+        "ENABLE_LONGS": True,
+        "ENABLE_SHORTS": True,
+        "ENABLE_SHORT_TREND_FILTER": True,
+        "SHORT_TREND_ENTRY_COL": "trend_48",
+        "SHORT_TREND_ENTRY_MAX": -0.0025,
+
+        "ENABLE_STRONG_TREND_GATE": False,
+        "ENABLE_REGIME_SWITCH": True,
+        "REGIME_TREND_COL": "trend_1000",
+        "REGIME_TREND_LONG_MIN": 0.003,
+        "REGIME_TREND_SHORT_MAX": -0.003,
+        "REGIME_VOL_COL": "rv1m_pct_5m",
+        "REGIME_VOL_MIN": 0.30,
+        "REGIME_EXIT_ON_FLIP": True,
+        "REGIME_EXIT_STREAK": 2,
+
+        "ENABLE_MACRO_BIAS": False,
+        "ENABLE_MACRO_LOCK": False,
+        "ENABLE_FLAT_UNFREEZE": False,
+        "STOP_LOSS_COOLDOWN_STEPS": 0,
+        "ENABLE_KILL_SWITCH": False,
+    },
+    # 5m regime + flow confirmation: require order-flow alignment for entries.
+    "tf_5m_regime_flow": {
+        "WARMUP_TRADES_BEFORE_GATING": 0,
+        "POSTERIOR_SCALE": 0.08,
+        "POSTERIOR_DECAY_HALF_LIFE_STEPS": 8_000,
+        "POSTERIOR_SCALE_MIN": 0.02,
+        "FORGETTING_FACTOR": 0.996,
+
+        "EDGE_THRESHOLD_MAX": 0.05,
+        "EDGE_THRESHOLD": 0.003,
+        "COST_EDGE_MULT": 1.2,
+        "EDGE_SAFETY_MARGIN": 0.00010,
+        "GATE_SAFETY_MARGIN": 0.00010,
+        "MARGIN_SCALE_MULT": 12.0,
+
+        "MIN_HOLD_STEPS": 6,
+        "MIN_TRADE_GAP_STEPS": 6,
+        "HYSTERESIS_REQUIRED_STREAK": 2,
+        "HYSTERESIS_ALLOW_IF_EDGE_MULT": 1.5,
+        "TRADE_RATE_WINDOW_STEPS": 1000,
+        "MAX_TRADES_PER_WINDOW": 30,
+        "TRADE_RATE_SELL_BYPASS_EDGE_MULT": 2.0,
+
+        "TURNOVER_PENALTY": 0.00005,
+        "TURNOVER_BUDGET_MULTIPLIER": 4.0,
+        "TURNOVER_BUDGET_MIN": 2.0,
+        "TURNOVER_BUDGET_PENALTY": 0.18,
+
+        "PARTIAL_SELLS": False,
+        "ENABLE_HARD_RISK_EXITS": True,
+        "HARD_STOP_LOSS_PCT": 0.04,
+        "STOP_LOSS_PCT": 0.012,
+        "TAKE_PROFIT_PCT": 0.02,
+        "USE_TRAILING_TP": False,
+        "FORCE_FULL_EXIT_ON_RISK": True,
+        "USE_ATR_EXITS": False,
+        "TRAILING_STOP_PCT": 0.03,
+        "MAX_POSITION_HOLD_STEPS": 48,
+
+        "ENABLE_TREND_EXIT": True,
+        "TREND_EXIT_COL": "trend_48",
+        "TREND_EXIT_LONG_MAX": -0.001,
+        "TREND_EXIT_SHORT_MIN": 0.001,
+        "TREND_EXIT_STREAK": 2,
+
+        "POSITION_FRACTION_MIN": 0.10,
+        "POSITION_FRACTION_MAX": 0.30,
+
+        "ENABLE_ENTRY_VOL_FILTER": True,
+        "ENTRY_VOL_COL": "rv1m_pct_5m",
+        "ENTRY_VOL_PCT_MIN": 0.40,
+        "ENABLE_BASIS_ENTRY_FILTER": False,
+        "ENABLE_TREND_ENTRY_FILTER": True,
+        "TREND_ENTRY_COL": "trend_48",
+        "TREND_ENTRY_MIN": 0.0025,
+        "ENABLE_FLOW_ENTRY_FILTER": True,
+        "FLOW_ENTRY_COL": "aggr_imb",
+        "FLOW_ENTRY_LONG_MIN": 0.8,
+        "ENABLE_LONGS": True,
+        "ENABLE_SHORTS": True,
+        "ENABLE_SHORT_TREND_FILTER": True,
+        "SHORT_TREND_ENTRY_COL": "trend_48",
+        "SHORT_TREND_ENTRY_MAX": -0.0025,
+        "ENABLE_FLOW_SHORT_FILTER": True,
+        "FLOW_ENTRY_SHORT_MAX": -0.8,
+
+        "ENABLE_STRONG_TREND_GATE": False,
+        "ENABLE_REGIME_SWITCH": True,
+        "REGIME_TREND_COL": "trend_1000",
+        "REGIME_TREND_LONG_MIN": 0.003,
+        "REGIME_TREND_SHORT_MAX": -0.003,
+        "REGIME_VOL_COL": "rv1m_pct_5m",
+        "REGIME_VOL_MIN": 0.30,
+        "REGIME_EXIT_ON_FLIP": True,
+        "REGIME_EXIT_STREAK": 2,
+
+        "ENABLE_MACRO_BIAS": False,
+        "ENABLE_MACRO_LOCK": False,
+        "ENABLE_FLAT_UNFREEZE": False,
+        "STOP_LOSS_COOLDOWN_STEPS": 0,
+        "ENABLE_KILL_SWITCH": False,
+    },
+    # 5m regime + micro-entry with maker-like costs (diagnostic).
+    "tf_5m_regime_micro_low_fee": {
+        "FEE_RATE": 0.0002,
+        "SLIPPAGE_RATE": 0.0002,
+        "WARMUP_TRADES_BEFORE_GATING": 0,
+        "POSTERIOR_SCALE": 0.08,
+        "POSTERIOR_DECAY_HALF_LIFE_STEPS": 8_000,
+        "POSTERIOR_SCALE_MIN": 0.02,
+        "FORGETTING_FACTOR": 0.996,
+
+        "EDGE_THRESHOLD_MAX": 0.05,
+        "EDGE_THRESHOLD": 0.003,
+        "COST_EDGE_MULT": 1.2,
+        "EDGE_SAFETY_MARGIN": 0.00010,
+        "GATE_SAFETY_MARGIN": 0.00010,
+        "MARGIN_SCALE_MULT": 12.0,
+
+        "MIN_HOLD_STEPS": 6,
+        "MIN_TRADE_GAP_STEPS": 6,
+        "HYSTERESIS_REQUIRED_STREAK": 2,
+        "HYSTERESIS_ALLOW_IF_EDGE_MULT": 1.5,
+        "TRADE_RATE_WINDOW_STEPS": 1000,
+        "MAX_TRADES_PER_WINDOW": 30,
+        "TRADE_RATE_SELL_BYPASS_EDGE_MULT": 2.0,
+
+        "TURNOVER_PENALTY": 0.00005,
+        "TURNOVER_BUDGET_MULTIPLIER": 4.0,
+        "TURNOVER_BUDGET_MIN": 2.0,
+        "TURNOVER_BUDGET_PENALTY": 0.18,
+
+        "PARTIAL_SELLS": False,
+        "ENABLE_HARD_RISK_EXITS": True,
+        "HARD_STOP_LOSS_PCT": 0.04,
+        "STOP_LOSS_PCT": 0.012,
+        "TAKE_PROFIT_PCT": 0.02,
+        "USE_TRAILING_TP": False,
+        "FORCE_FULL_EXIT_ON_RISK": True,
+        "USE_ATR_EXITS": False,
+        "TRAILING_STOP_PCT": 0.03,
+        "MAX_POSITION_HOLD_STEPS": 48,
+
+        "ENABLE_TREND_EXIT": True,
+        "TREND_EXIT_COL": "trend_48",
+        "TREND_EXIT_LONG_MAX": -0.001,
+        "TREND_EXIT_SHORT_MIN": 0.001,
+        "TREND_EXIT_STREAK": 2,
+
+        "POSITION_FRACTION_MIN": 0.10,
+        "POSITION_FRACTION_MAX": 0.30,
+
+        "ENABLE_ENTRY_VOL_FILTER": True,
+        "ENTRY_VOL_COL": "rv1m_pct_5m",
+        "ENTRY_VOL_PCT_MIN": 0.40,
+        "ENABLE_BASIS_ENTRY_FILTER": False,
+        "ENABLE_TREND_ENTRY_FILTER": True,
+        "TREND_ENTRY_COL": "trend_48",
+        "TREND_ENTRY_MIN": 0.0025,
+        "ENABLE_LONGS": True,
+        "ENABLE_SHORTS": True,
+        "ENABLE_SHORT_TREND_FILTER": True,
+        "SHORT_TREND_ENTRY_COL": "trend_48",
+        "SHORT_TREND_ENTRY_MAX": -0.0025,
+
+        "ENABLE_STRONG_TREND_GATE": False,
+        "ENABLE_REGIME_SWITCH": True,
+        "REGIME_TREND_COL": "trend_1000",
+        "REGIME_TREND_LONG_MIN": 0.003,
+        "REGIME_TREND_SHORT_MAX": -0.003,
+        "REGIME_VOL_COL": "rv1m_pct_5m",
+        "REGIME_VOL_MIN": 0.30,
+        "REGIME_EXIT_ON_FLIP": True,
+        "REGIME_EXIT_STREAK": 2,
+
+        "ENABLE_MACRO_BIAS": False,
+        "ENABLE_MACRO_LOCK": False,
+        "ENABLE_FLAT_UNFREEZE": False,
+        "STOP_LOSS_COOLDOWN_STEPS": 0,
+        "ENABLE_KILL_SWITCH": False,
+    },
+    # 5m core+scalp: maintain a trend core and scalp mean-reversion around it.
+    "tf_5m_core_scalp": {
+        "WARMUP_TRADES_BEFORE_GATING": 0,
+        "POSTERIOR_SCALE": 0.05,
+        "POSTERIOR_DECAY_HALF_LIFE_STEPS": 8_000,
+        "POSTERIOR_SCALE_MIN": 0.01,
+        "FORGETTING_FACTOR": 0.995,
+
+        "EDGE_THRESHOLD_MAX": 0.05,
+        "EDGE_THRESHOLD": 0.003,
+        "COST_EDGE_MULT": 1.2,
+        "EDGE_SAFETY_MARGIN": 0.00010,
+        "GATE_SAFETY_MARGIN": 0.00010,
+        "MARGIN_SCALE_MULT": 10.0,
+
+        "MIN_HOLD_STEPS": 4,
+        "MIN_TRADE_GAP_STEPS": 4,
+        "HYSTERESIS_REQUIRED_STREAK": 1,
+        "HYSTERESIS_ALLOW_IF_EDGE_MULT": 1.4,
+        "TRADE_RATE_WINDOW_STEPS": 1000,
+        "MAX_TRADES_PER_WINDOW": 40,
+        "TRADE_RATE_SELL_BYPASS_EDGE_MULT": 1.5,
+
+        "TURNOVER_PENALTY": 0.00005,
+        "TURNOVER_BUDGET_MULTIPLIER": 6.0,
+        "TURNOVER_BUDGET_MIN": 2.0,
+        "TURNOVER_BUDGET_PENALTY": 0.18,
+
+        "PARTIAL_SELLS": True,
+        "ENABLE_HARD_RISK_EXITS": True,
+        "HARD_STOP_LOSS_PCT": 0.06,
+        "STOP_LOSS_PCT": 0.015,
+        "TAKE_PROFIT_PCT": 0.03,
+        "USE_TRAILING_TP": False,
+        "FORCE_FULL_EXIT_ON_RISK": True,
+        "USE_ATR_EXITS": False,
+        "TRAILING_STOP_PCT": 0.03,
+        "MAX_POSITION_HOLD_STEPS": 120,
+
+        "ENABLE_TREND_EXIT": True,
+        "TREND_EXIT_COL": "trend_48",
+        "TREND_EXIT_LONG_MAX": -0.0015,
+        "TREND_EXIT_SHORT_MIN": 0.0015,
+        "TREND_EXIT_STREAK": 2,
+
+        "POSITION_FRACTION_MIN": 0.05,
+        "POSITION_FRACTION_MAX": 0.25,
+
+        "ENABLE_ENTRY_VOL_FILTER": True,
+        "ENTRY_VOL_COL": "rv1m_pct_5m",
+        "ENTRY_VOL_PCT_MIN": 0.35,
+        "ENABLE_BASIS_ENTRY_FILTER": False,
+        "ENABLE_TREND_ENTRY_FILTER": False,
+        "ENABLE_LONGS": True,
+        "ENABLE_SHORTS": True,
+
+        "ENABLE_STRONG_TREND_GATE": False,
+        "ENABLE_REGIME_SWITCH": False,
+        "ENABLE_MACRO_BIAS": False,
+        "ENABLE_MACRO_LOCK": False,
+
+        "ENABLE_CORE_SCALP": True,
+        "CORE_TREND_COL": "trend_240",
+        "CORE_TREND_LONG_MIN": 0.002,
+        "CORE_TREND_SHORT_MAX": -0.002,
+        "CORE_EXIT_ON_NEUTRAL": True,
+        "CORE_POSITION_FRACTION": 0.15,
+        "SCALP_EXTRA_FRACTION": 0.05,
+        "SCALP_MAX_LEGS": 4,
+        "SCALP_EMA_WINDOW": 20,
+        "SCALP_BAND_PCT": 0.0015,
+        "SCALP_MIN_GAP_STEPS": 12,
+
+        "ENABLE_FLAT_UNFREEZE": False,
+        "STOP_LOSS_COOLDOWN_STEPS": 0,
+        "ENABLE_KILL_SWITCH": False,
+    },
+    # 5m edge-gate profile: supervised return filter to block low-edge trades.
+    "tf_5m_edge_gate": {
+        "WARMUP_TRADES_BEFORE_GATING": 0,
+        "POSTERIOR_SCALE": 0.08,
+        "POSTERIOR_DECAY_HALF_LIFE_STEPS": 8_000,
+        "POSTERIOR_SCALE_MIN": 0.02,
+        "FORGETTING_FACTOR": 0.996,
+
+        "EDGE_THRESHOLD_MAX": 0.05,
+        "EDGE_THRESHOLD": 0.003,
+        "COST_EDGE_MULT": 1.2,
+        "EDGE_SAFETY_MARGIN": 0.00010,
+        "GATE_SAFETY_MARGIN": 0.00010,
+        "MARGIN_SCALE_MULT": 12.0,
+
+        "MIN_HOLD_STEPS": 6,
+        "MIN_TRADE_GAP_STEPS": 6,
+        "HYSTERESIS_REQUIRED_STREAK": 2,
+        "HYSTERESIS_ALLOW_IF_EDGE_MULT": 1.5,
+        "TRADE_RATE_WINDOW_STEPS": 1000,
+        "MAX_TRADES_PER_WINDOW": 30,
+        "TRADE_RATE_SELL_BYPASS_EDGE_MULT": 2.0,
+
+        "TURNOVER_PENALTY": 0.00005,
+        "TURNOVER_BUDGET_MULTIPLIER": 4.0,
+        "TURNOVER_BUDGET_MIN": 2.0,
+        "TURNOVER_BUDGET_PENALTY": 0.18,
+
+        "PARTIAL_SELLS": False,
+        "ENABLE_HARD_RISK_EXITS": True,
+        "HARD_STOP_LOSS_PCT": 0.04,
+        "STOP_LOSS_PCT": 0.012,
+        "TAKE_PROFIT_PCT": 0.02,
+        "USE_TRAILING_TP": False,
+        "FORCE_FULL_EXIT_ON_RISK": True,
+        "USE_ATR_EXITS": False,
+        "TRAILING_STOP_PCT": 0.03,
+        "MAX_POSITION_HOLD_STEPS": 48,
+
+        "ENABLE_TREND_EXIT": True,
+        "TREND_EXIT_COL": "trend_48",
+        "TREND_EXIT_LONG_MAX": -0.001,
+        "TREND_EXIT_SHORT_MIN": 0.001,
+        "TREND_EXIT_STREAK": 2,
+
+        "POSITION_FRACTION_MIN": 0.10,
+        "POSITION_FRACTION_MAX": 0.30,
+
+        "ENABLE_ENTRY_VOL_FILTER": True,
+        "ENTRY_VOL_COL": "rv1m_pct_5m",
+        "ENTRY_VOL_PCT_MIN": 0.40,
+        "ENABLE_BASIS_ENTRY_FILTER": False,
+        "ENABLE_TREND_ENTRY_FILTER": True,
+        "TREND_ENTRY_COL": "trend_48",
+        "TREND_ENTRY_MIN": 0.0025,
+        "ENABLE_LONGS": True,
+        "ENABLE_SHORTS": True,
+        "ENABLE_SHORT_TREND_FILTER": True,
+        "SHORT_TREND_ENTRY_COL": "trend_48",
+        "SHORT_TREND_ENTRY_MAX": -0.0025,
+
+        "ENABLE_STRONG_TREND_GATE": False,
+        "ENABLE_REGIME_SWITCH": True,
+        "REGIME_TREND_COL": "trend_1000",
+        "REGIME_TREND_LONG_MIN": 0.003,
+        "REGIME_TREND_SHORT_MAX": -0.003,
+        "REGIME_VOL_COL": "rv1m_pct_5m",
+        "REGIME_VOL_MIN": 0.30,
+        "REGIME_EXIT_ON_FLIP": True,
+        "REGIME_EXIT_STREAK": 2,
+
+        "ENABLE_MACRO_BIAS": False,
+        "ENABLE_MACRO_LOCK": False,
+        "ENABLE_EDGE_GATE": True,
+        "EDGE_GATE_COST_MULT": 1.1,
+        "EDGE_GATE_MIN_EDGE": 0.0002,
+        "EDGE_GATE_WARMUP_STEPS": 200,
+        "EDGE_GATE_DECAY": 0.99,
+        "EDGE_GATE_RIDGE": 0.5,
+        "EDGE_GATE_TARGET_CLIP": 0.02,
+        "ENABLE_FLAT_UNFREEZE": False,
+        "STOP_LOSS_COOLDOWN_STEPS": 0,
+        "ENABLE_KILL_SWITCH": False,
+    },
+    # 5m edge-gate sign-only: use predicted sign as entry filter, keep trades flowing.
+    "tf_5m_edge_gate_sign": {
+        "WARMUP_TRADES_BEFORE_GATING": 0,
+        "POSTERIOR_SCALE": 0.08,
+        "POSTERIOR_DECAY_HALF_LIFE_STEPS": 8_000,
+        "POSTERIOR_SCALE_MIN": 0.02,
+        "FORGETTING_FACTOR": 0.996,
+
+        "EDGE_THRESHOLD_MAX": 0.05,
+        "EDGE_THRESHOLD": 0.003,
+        "COST_EDGE_MULT": 1.2,
+        "EDGE_SAFETY_MARGIN": 0.00010,
+        "GATE_SAFETY_MARGIN": 0.00010,
+        "MARGIN_SCALE_MULT": 12.0,
+
+        "MIN_HOLD_STEPS": 4,
+        "MIN_TRADE_GAP_STEPS": 4,
+        "HYSTERESIS_REQUIRED_STREAK": 1,
+        "HYSTERESIS_ALLOW_IF_EDGE_MULT": 1.4,
+        "TRADE_RATE_WINDOW_STEPS": 1000,
+        "MAX_TRADES_PER_WINDOW": 40,
+        "TRADE_RATE_SELL_BYPASS_EDGE_MULT": 2.0,
+
+        "TURNOVER_PENALTY": 0.00005,
+        "TURNOVER_BUDGET_MULTIPLIER": 4.0,
+        "TURNOVER_BUDGET_MIN": 2.0,
+        "TURNOVER_BUDGET_PENALTY": 0.18,
+
+        "PARTIAL_SELLS": False,
+        "ENABLE_HARD_RISK_EXITS": True,
+        "HARD_STOP_LOSS_PCT": 0.04,
+        "STOP_LOSS_PCT": 0.012,
+        "TAKE_PROFIT_PCT": 0.02,
+        "USE_TRAILING_TP": False,
+        "FORCE_FULL_EXIT_ON_RISK": True,
+        "USE_ATR_EXITS": False,
+        "TRAILING_STOP_PCT": 0.03,
+        "MAX_POSITION_HOLD_STEPS": 48,
+
+        "ENABLE_TREND_EXIT": True,
+        "TREND_EXIT_COL": "trend_48",
+        "TREND_EXIT_LONG_MAX": -0.001,
+        "TREND_EXIT_SHORT_MIN": 0.001,
+        "TREND_EXIT_STREAK": 2,
+
+        "POSITION_FRACTION_MIN": 0.10,
+        "POSITION_FRACTION_MAX": 0.30,
+
+        "ENABLE_ENTRY_VOL_FILTER": False,
+        "ENABLE_BASIS_ENTRY_FILTER": False,
+        "ENABLE_TREND_ENTRY_FILTER": False,
+        "ENABLE_LONGS": True,
+        "ENABLE_SHORTS": True,
+        "ENABLE_SHORT_TREND_FILTER": False,
+
+        "ENABLE_STRONG_TREND_GATE": False,
+        "ENABLE_REGIME_SWITCH": False,
+        "ENABLE_MACRO_BIAS": False,
+        "ENABLE_MACRO_LOCK": False,
+        "ENABLE_EDGE_GATE": True,
+        "EDGE_GATE_SIGN_ONLY": True,
+        "EDGE_GATE_WARMUP_STEPS": 200,
+        "EDGE_GATE_DECAY": 0.99,
+        "EDGE_GATE_RIDGE": 0.5,
+        "EDGE_GATE_TARGET_CLIP": 0.02,
+        "ENABLE_FLAT_UNFREEZE": False,
+        "STOP_LOSS_COOLDOWN_STEPS": 0,
+        "ENABLE_KILL_SWITCH": False,
+    },
+    # 5m edge-policy: act directly on supervised return sign/magnitude.
+    "tf_5m_edge_policy": {
+        "WARMUP_TRADES_BEFORE_GATING": 0,
+        "POSTERIOR_SCALE": 0.02,
+        "POSTERIOR_DECAY_HALF_LIFE_STEPS": 8_000,
+        "POSTERIOR_SCALE_MIN": 0.01,
+        "FORGETTING_FACTOR": 0.998,
+
+        "EDGE_THRESHOLD_MAX": 0.05,
+        "EDGE_THRESHOLD": 0.003,
+        "COST_EDGE_MULT": 1.2,
+        "EDGE_SAFETY_MARGIN": 0.00010,
+        "GATE_SAFETY_MARGIN": 0.00010,
+        "MARGIN_SCALE_MULT": 10.0,
+
+        "MIN_HOLD_STEPS": 4,
+        "MIN_TRADE_GAP_STEPS": 4,
+        "HYSTERESIS_REQUIRED_STREAK": 1,
+        "HYSTERESIS_ALLOW_IF_EDGE_MULT": 1.4,
+        "TRADE_RATE_WINDOW_STEPS": 1000,
+        "MAX_TRADES_PER_WINDOW": 60,
+        "TRADE_RATE_SELL_BYPASS_EDGE_MULT": 2.0,
+
+        "TURNOVER_PENALTY": 0.00005,
+        "TURNOVER_BUDGET_MULTIPLIER": 4.0,
+        "TURNOVER_BUDGET_MIN": 2.0,
+        "TURNOVER_BUDGET_PENALTY": 0.18,
+
+        "PARTIAL_SELLS": False,
+        "ENABLE_HARD_RISK_EXITS": True,
+        "HARD_STOP_LOSS_PCT": 0.04,
+        "STOP_LOSS_PCT": 0.015,
+        "TAKE_PROFIT_PCT": 0.02,
+        "USE_TRAILING_TP": False,
+        "FORCE_FULL_EXIT_ON_RISK": True,
+        "USE_ATR_EXITS": False,
+        "TRAILING_STOP_PCT": 0.03,
+        "MAX_POSITION_HOLD_STEPS": 96,
+
+        "ENABLE_TREND_EXIT": True,
+        "TREND_EXIT_COL": "trend_48",
+        "TREND_EXIT_LONG_MAX": -0.001,
+        "TREND_EXIT_SHORT_MIN": 0.001,
+        "TREND_EXIT_STREAK": 2,
+
+        "POSITION_FRACTION_MIN": 0.10,
+        "POSITION_FRACTION_MAX": 0.30,
+
+        "ENABLE_ENTRY_VOL_FILTER": False,
+        "ENABLE_BASIS_ENTRY_FILTER": False,
+        "ENABLE_TREND_ENTRY_FILTER": False,
+        "ENABLE_LONGS": True,
+        "ENABLE_SHORTS": True,
+        "ENABLE_SHORT_TREND_FILTER": False,
+
+        "ENABLE_STRONG_TREND_GATE": False,
+        "ENABLE_REGIME_SWITCH": False,
+        "ENABLE_MACRO_BIAS": False,
+        "ENABLE_MACRO_LOCK": False,
+        "ENABLE_EDGE_GATE": True,
+        "EDGE_GATE_SIGN_ONLY": False,
+        "EDGE_GATE_MODEL": "logistic",
+        "EDGE_GATE_WARMUP_STEPS": 200,
+        "EDGE_GATE_DECAY": 0.99,
+        "EDGE_GATE_LR": 0.03,
+        "EDGE_GATE_L2": 1e-3,
+        "EDGE_GATE_TARGET_CLIP": 0.02,
+        "EDGE_GATE_TARGET_HORIZON": 6,
+        "EDGE_GATE_TARGET_MIN_ABS": 0.0005,
+        "EDGE_GATE_MIN_EDGE": 0.1,
+        "ENABLE_EDGE_POLICY": True,
+        "EDGE_POLICY_MIN_EDGE": 0.1,
+        "EDGE_POLICY_SIGN_ONLY": False,
+        "ENABLE_FLAT_UNFREEZE": False,
+        "STOP_LOSS_COOLDOWN_STEPS": 0,
+        "ENABLE_KILL_SWITCH": False,
     },
 }
 
