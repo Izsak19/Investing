@@ -74,6 +74,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dashboard", action="store_true", help="enable live dashboard rendering")
     parser.add_argument("--web-dashboard", action="store_true", help="serve a Plotly HTML dashboard on port 8000")
     parser.add_argument("--web-port", type=int, default=8000, help="port for the web dashboard")
+    parser.add_argument(
+        "--web-window-hours",
+        type=float,
+        default=48.0,
+        help="Time window to display on the web dashboard (hours).",
+    )
     parser.add_argument("--continuous", action="store_true", help="keep fetching live data until interrupted")
     parser.add_argument("--run-id", default=None, help="identifier for this training run")
     parser.add_argument("--run-dir", default=None, help="directory to store run artifacts")
@@ -102,6 +108,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.0,
         help="Percentage gain on initial cash required before enabling --continuous mode (0 means breakeven).",
+    )
+    parser.add_argument(
+        "--warmup-steps",
+        type=int,
+        default=0,
+        help="Single-pass warmup steps before going live (0 uses --steps).",
     )
     parser.add_argument(
         "--posterior-scale",
@@ -393,8 +405,8 @@ def stream_live(
             price = float(row["close"])
             before_trade_value = trainer.portfolio.value(price)
             edge_horizon = max(1, int(getattr(config, "EDGE_GATE_TARGET_HORIZON", 1) or 1))
-            future_idx = min(idx + edge_horizon, len(feature_frame) - 1)
-            future_price = float(feature_frame.iloc[future_idx]["close"])
+            future_idx = min(i + edge_horizon, len(frame) - 1)
+            future_price = float(frame.iloc[future_idx]["close"])
             result = trainer.step(
                 row,
                 next_row,
@@ -479,6 +491,9 @@ def main() -> None:
         args.continuous = False
     if args.warmup_trades is not None:
         config.WARMUP_TRADES_BEFORE_GATING = max(0, args.warmup_trades)
+    warmup_steps = max(0, int(getattr(args, "warmup_steps", 0) or 0))
+    if warmup_steps <= 0 and args.continuous and (args.warmup_hours > 0 or args.warmup_profit_target != 0):
+        warmup_steps = max(0, int(args.steps))
     limit = args.limit
     if args.offline and args.duration:
         candles_for_window = math.ceil(args.duration / timeframe_to_minutes(args.timeframe))
@@ -492,6 +507,8 @@ def main() -> None:
     history_candles = max(0, int(getattr(args, "history_candles", 0) or 0))
     if history_candles > 0:
         limit = max(limit, history_candles)
+    if args.continuous and warmup_steps > 0:
+        limit = max(limit, warmup_steps + 1)
     if args.duration is None and args.steps > limit:
         limit = args.steps + 1
 
@@ -556,7 +573,21 @@ def main() -> None:
         posterior_override = max(posterior_override, eval_scale_floor)
     if args.resume and not args.walkforward and not args.fresh_agent:
         resume_from(run_dir, agent, trainer)
-    web_dashboard = WebDashboard(port=args.web_port) if args.web_dashboard else None
+    web_dashboard = None
+    if args.web_dashboard:
+        try:
+            tf_min_for_web = timeframe_to_minutes(args.timeframe)
+        except Exception:
+            tf_min_for_web = None
+        if tf_min_for_web and tf_min_for_web > 0:
+            web_history = max(1, math.ceil((args.web_window_hours * 60.0) / tf_min_for_web))
+        else:
+            web_history = 500
+        web_dashboard = WebDashboard(
+            port=args.web_port,
+            history=web_history,
+            window_hours=args.web_window_hours,
+        )
     if web_dashboard:
         web_dashboard.start()
 
@@ -646,20 +677,20 @@ def main() -> None:
         feature_frame, is_live = feed.fetch(include_indicators=True)
 
         warmup_target = trainer.initial_cash * (1 + args.warmup_profit_target / 100)
-        warmup_seconds = args.warmup_hours * 3600
+        warmup_steps_effective = warmup_steps
         def warmup_then_stream():
             warmup_hit = False
 
-            if args.warmup_hours > 0:
+            if warmup_steps_effective > 0:
                 print(
-                    f"Starting warmup for up to {args.warmup_hours:.2f}h on the last {max(24.0, float(args.warmup_hours)):.0f}h window "
+                    f"Starting warmup for {warmup_steps_effective} steps on the latest window "
                     f"(target portfolio >= {warmup_target:.2f})."
                 )
                 for event in run_loop(
                     trainer,
                     feature_frame,
-                    args.steps,
-                    warmup_seconds,
+                    warmup_steps_effective,
+                    None,
                     args.delay,
                     run_id=run_id,
                     run_dir=run_dir,
@@ -675,17 +706,14 @@ def main() -> None:
                     if portfolio_value >= warmup_target:
                         warmup_hit = True
                         print(
-                            f"Warmup profit target reached (portfolio {portfolio_value:.2f} >= {warmup_target:.2f}). "
-                            "Switching to live stream..."
+                            f"Warmup profit target reached (portfolio {portfolio_value:.2f} >= {warmup_target:.2f})."
                         )
-                        break
 
                 if not warmup_hit:
                     print(
                         f"Warmup ended without reaching the profit target ({warmup_target:.2f}). "
-                        "Continuous mode will not start."
+                        "Continuing to live stream anyway."
                     )
-                    return
 
             print("Starting continuous live stream...")
             yield from stream_live(

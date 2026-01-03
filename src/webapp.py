@@ -58,10 +58,17 @@ class TradeEvent:
 class WebDashboard:
     """Lightweight FastAPI server to stream trade events to a browser UI."""
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 8000, history: int = 500):
+    def __init__(
+        self,
+        host: str = "0.0.0.0",
+        port: int = 8000,
+        history: int = 500,
+        window_hours: float = 48.0,
+    ):
         self.host = host
         self.port = port
         self.history = history
+        self.window_hours = float(window_hours)
 
         self._events: Deque[TradeEvent] = deque(maxlen=history)
         self._lock = threading.Lock()
@@ -78,6 +85,10 @@ class WebDashboard:
         templates_dir = Path(__file__).resolve().parent / "templates"
         index_path = templates_dir / "index.html"
         index_html = index_path.read_text() if index_path.exists() else "<h1>Dashboard missing</h1>"
+        if "__HISTORY__" in index_html:
+            index_html = index_html.replace("__HISTORY__", str(self.history))
+        if "__WINDOW_HOURS__" in index_html:
+            index_html = index_html.replace("__WINDOW_HOURS__", str(self.window_hours))
 
         @self._app.get("/", response_class=HTMLResponse)
         def index() -> str:  # pragma: no cover - exercised at runtime

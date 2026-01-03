@@ -307,6 +307,7 @@ class Trainer:
         self._edge_gate: EdgeGateModel | EdgeGateClassifier | None = None
         self._edge_gate_steps: int = 0
         self._edge_gate_mode: str | None = None
+        self._edge_entry_strength: float | None = None
 
     def reset_portfolio(self) -> None:
         """Reset portfolio and tracking buffers to their initial state."""
@@ -378,6 +379,8 @@ class Trainer:
         self._edge_gate = None
         self._edge_gate_steps = 0
         self._edge_gate_mode = None
+        self._edge_entry_strength = None
+        self._edge_entry_strength = None
 
     # --- helpers --------------------------------------------------------------
 
@@ -1731,6 +1734,10 @@ class Trainer:
                 if atr > 0.0 and entry_price > 0.0:
                     stop_pct = float(getattr(config, "ATR_STOP_MULT", 0.0)) * (atr / entry_price)
                     tp_pct = float(getattr(config, "ATR_TP_MULT", 0.0)) * (atr / entry_price)
+            edge_strength = float(self._edge_entry_strength or 0.0)
+            tp_boost = float(getattr(config, "EDGE_POLICY_TP_BOOST", 0.0))
+            if tp_boost > 0.0 and edge_strength > 0.0:
+                tp_pct = tp_pct * (1.0 + tp_boost * min(1.0, edge_strength))
             stop_hit = pos_ret <= -stop_pct
             tp_hit = pos_ret >= tp_pct
             trail_hit = False
@@ -1887,6 +1894,7 @@ class Trainer:
                                 self.portfolio.entry_price = 0.0
                                 self.portfolio.entry_value = 0.0
                                 self._pos_trough_price = None
+                                self._edge_entry_strength = None
                                 self.last_entry_step = -1
                                 self._buy_legs_current = 0
                             self.last_trade_step = self.steps
@@ -1958,6 +1966,10 @@ class Trainer:
                     if prior_pos == 0:
                         self.portfolio.entry_value = value_before
                         self._buy_legs_current = 1
+                        if edge_policy_active and edge_gate_pred is not None:
+                            self._edge_entry_strength = min(1.0, abs(float(edge_gate_pred)))
+                        else:
+                            self._edge_entry_strength = None
                     else:
                         self._buy_legs_current += 1
 
@@ -2031,6 +2043,7 @@ class Trainer:
                         self.portfolio.entry_price = 0.0
                         self.portfolio.entry_value = 0.0
                         self._pos_peak_price = None
+                        self._edge_entry_strength = None
                         self.last_entry_step = -1
                         self._buy_legs_current = 0
                     else:
@@ -2091,6 +2104,10 @@ class Trainer:
                     if prior_pos == 0:
                         self.portfolio.entry_value = value_before
                         self._buy_legs_current = 0
+                        if edge_policy_active and edge_gate_pred is not None:
+                            self._edge_entry_strength = min(1.0, abs(float(edge_gate_pred)))
+                        else:
+                            self._edge_entry_strength = None
 
                     self.last_trade_step = self.steps
                     self.last_entry_step = self.steps

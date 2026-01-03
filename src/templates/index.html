@@ -137,7 +137,7 @@
       const layout = {
         template: "plotly_dark",
         margin: { t: 40, r: 20, b: 40, l: 60 },
-        xaxis: { rangeslider: { visible: false } },
+        xaxis: { rangeslider: { visible: false }, type: "date" },
         yaxis: { title: "Price" },
         yaxis2: {
           title: "Portfolio",
@@ -229,6 +229,15 @@
         latestMetrics = null;
       }
 
+      function parseTimestamp(raw) {
+        if (!raw) return null;
+        const parsed = new Date(raw);
+        if (Number.isNaN(parsed.getTime())) return null;
+        return parsed;
+      }
+
+      let latestTimestamp = null;
+
       function updateChart(events) {
         if (!events || events.length === 0) return;
 
@@ -253,7 +262,11 @@
         };
 
         events.forEach((evt) => {
-          const label = evt.timestamp || `Step ${evt.step}`;
+          const parsedTs = parseTimestamp(evt.timestamp);
+          const label = parsedTs || `Step ${evt.step}`;
+          if (parsedTs) {
+            latestTimestamp = parsedTs;
+          }
 
           candleUpdate.x[0].push(label);
           candleUpdate.open[0].push(evt.open);
@@ -278,6 +291,11 @@
         Plotly.extendTraces("chart", candleUpdate, [0], history);
         Plotly.extendTraces("chart", actionUpdate, [1], history);
         Plotly.extendTraces("chart", portfolioUpdate, [2], history);
+        if (latestTimestamp && windowHours > 0) {
+          const end = latestTimestamp;
+          const start = new Date(end.getTime() - windowHours * 3600 * 1000);
+          Plotly.relayout("chart", { "xaxis.range": [start, end] });
+        }
       }
 
       function mergeMetrics(payload) {
@@ -341,7 +359,8 @@
         }
       }
 
-      const history = 500;
+      const history = __HISTORY__;
+      const windowHours = __WINDOW_HOURS__;
       const [candleTrace, actionTrace, portfolioTrace] = createTraces();
 
       Plotly.newPlot("chart", [candleTrace, actionTrace, portfolioTrace], layout);
